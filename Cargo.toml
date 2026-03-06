@@ -2,6 +2,7 @@
 name = "niventic"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 slint = { version = "1.15", features = ["raw-window-handle-06"] }
@@ -29,3 +30,4 @@ features = [
 
 [build-dependencies]
 slint-build = "1.15.0"
+winres = "0.1.12"
