@@ -212,15 +212,68 @@ fn main() -> Result<(), slint::PlatformError> {
     let window_weak = main_window.as_weak();
     let vis = is_visible.clone();
     let timer = slint::Timer::default();
+
+    // Track when window was last shown (grace period for focus check)
+    let shown_at: Rc<RefCell<Option<std::time::Instant>>> = Rc::new(RefCell::new(None));
+    let shown_at_clone = shown_at.clone();
+
+    // Cache our HWND (found lazily on first use via raw_window_handle)
+    let our_hwnd: Rc<RefCell<Option<windows::Win32::Foundation::HWND>>> = Rc::new(RefCell::new(None));
+
     timer.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(50),
         move || {
+            // === Focus loss detection ===
+            if vis.get() {
+                let shown_time = *shown_at_clone.borrow();
+                if let Some(t) = shown_time {
+                    // Only check after 150ms grace period to let SetForegroundWindow sink in
+                    if t.elapsed() > std::time::Duration::from_millis(150) {
+                        let hwnd = {
+                            let mut cached = our_hwnd.borrow_mut();
+                            if cached.is_none() {
+                                if let Some(w) = window_weak.upgrade() {
+                                    use raw_window_handle::HasWindowHandle;
+                                    if let Ok(handle) = w.window().window_handle().window_handle() {
+                                        if let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() {
+                                            *cached = Some(windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _));
+                                        }
+                                    }
+                                }
+                            }
+                            *cached
+                        };
+
+                        if let Some(our) = hwnd {
+                            let fg = unsafe {
+                                windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()
+                            };
+                            if fg != our && !fg.is_invalid() && fg.0 != std::ptr::null_mut() {
+                                if let Some(w) = window_weak.upgrade() {
+                                    w.window().set_position(OFF_SCREEN);
+                                    vis.set(false);
+                                    w.set_search_text(SharedString::from(""));
+                                    w.set_selected_index(0);
+                                    w.set_show_settings(false);
+                                    let model = Rc::new(VecModel::<SearchResult>::default());
+                                    w.set_results(ModelRc::from(model));
+                                    *shown_at_clone.borrow_mut() = None;
+                                    eprintln!("[niventic] Window hidden (focus lost)");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // === Hotkey toggle ===
             if let Ok(hotkey::HotkeyEvent::Toggle) = hotkey_rx.try_recv() {
                 if let Some(w) = window_weak.upgrade() {
                     if vis.get() {
                         w.window().set_position(OFF_SCREEN);
                         vis.set(false);
+                        *shown_at_clone.borrow_mut() = None;
                         eprintln!("[niventic] Window hidden");
                     } else {
                         // Reset search state when showing
@@ -235,13 +288,25 @@ fn main() -> Result<(), slint::PlatformError> {
                             sz.height as i32,
                         ));
                         vis.set(true);
+                        *shown_at_clone.borrow_mut() = Some(std::time::Instant::now());
 
-                        // Force foreground focus (Windows blocks bg windows from stealing focus)
-                        unsafe {
-                            use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow};
-                            use windows::core::w;
-                            if let Ok(hwnd) = FindWindowW(None, w!("Niventic Launcher")) {
-                                let _ = SetForegroundWindow(hwnd);
+                        // Reliably steal focus using cached HWND
+                        let hwnd = {
+                            let mut cached = our_hwnd.borrow_mut();
+                            if cached.is_none() {
+                                use raw_window_handle::HasWindowHandle;
+                                if let Ok(handle) = w.window().window_handle().window_handle() {
+                                    if let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() {
+                                        *cached = Some(windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _));
+                                    }
+                                }
+                            }
+                            *cached
+                        };
+                        
+                        if let Some(our) = hwnd {
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(our);
                             }
                         }
 
@@ -258,11 +323,13 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // Set position and focus after a brief delay so window().size() is accurate
     let window_weak = main_window.as_weak();
+    let shown_at_init = shown_at.clone();
     slint::Timer::single_shot(std::time::Duration::from_millis(100), move || {
         if let Some(w) = window_weak.upgrade() {
             let sz = w.window().size();
             w.window().set_position(center_position(sz.width as i32, sz.height as i32));
             w.invoke_focus_search();
+            *shown_at_init.borrow_mut() = Some(std::time::Instant::now());
         }
     });
 
