@@ -1,0 +1,847 @@
+import { ScrollView, VerticalBox, LineEdit } from "std-widgets.slint";
+
+// Data model for a single search result item
+export struct SearchResult {
+    name: string,
+    path: string,
+    icon: string,
+    icon-image: image,
+    has-icon: bool,
+}
+
+// Data model for a quick access entry
+export struct QuickAccessEntry {
+    name: string,
+    path: string,
+    icon: string,
+}
+
+export component AppWindow inherits Window {
+    title: "Niventic Launcher";
+    width: 800px;
+    height: 500px;
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    default-font-family: "JetBrainsMono Nerd Font";
+    
+
+    // === Public API ===
+    in property <[SearchResult]> results: [];
+    in-out property <string> search-text: "";
+    in-out property <int> selected-index: 0;
+    callback escape-pressed();
+    callback search-changed(string);
+    callback item-activated(int);
+    callback quick-access-activated(string);
+    callback save-settings();
+
+    // === Settings State ===
+    in-out property <bool> show-settings: false;
+
+    // Appearance settings (string form for settings UI editing)
+    in-out property <string> cfg-width: "800";
+    in-out property <string> cfg-height: "500";
+    in-out property <string> cfg-font: "JetBrainsMono Nerd Font";
+    in-out property <string> cfg-bg: "#2d2d30";
+    in-out property <string> cfg-border-radius: "14";
+    in-out property <string> cfg-border-width: "0.5";
+    in-out property <string> cfg-border-color: "#a9a9a9";
+
+    // Typed properties for live rendering (set from Rust)
+    in-out property <brush> app-bg: #2d2d30;
+    in-out property <length> app-border-radius: 14px;
+    in-out property <length> app-border-width: 0.5px;
+    in-out property <brush> app-border-color: #a9a9a9;
+    in-out property <string> app-font: "JetBrainsMono Nerd Font";
+
+    // Quick Access settings
+    in-out property <[QuickAccessEntry]> cfg-quick-access: [];
+
+    // Focus the search input
+    public function focus-search() {
+        search-input.focus();
+    }
+
+    // === Main container ===
+    Rectangle {
+        x: 8px;
+        y: 8px;
+        width: parent.width - 16px;
+        height: parent.height - 16px;
+        background: root.app-bg;
+        border-radius: root.app-border-radius;
+        border-width: root.app-border-width;
+        border-color: root.app-border-color;
+        opacity: 0.9;
+        VerticalLayout {
+            spacing: 0px;
+
+            // ─── Search Bar ───
+            Rectangle {
+                height: 56px;
+                HorizontalLayout {
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    padding-top: 17px;
+                    alignment: LayoutAlignment.start;
+                    padding-bottom: 15px;
+                    spacing: 12px;
+                    Image {
+                        source: @image-url("assets/search.svg");
+                        vertical-alignment: ImageVerticalAlignment.center;
+                        width: 22px;
+                        height: 22px;
+                        horizontal-alignment: ImageHorizontalAlignment.center;
+                        horizontal-tiling: ImageTiling.none;
+                        image-rendering: ImageRendering.smooth;
+                        colorize: #909094;
+                    }
+
+                    // Search input + placeholder wrapper
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        search-input := TextInput {
+                            width: 100%;
+                            height: 100%;
+                            text <=> root.search-text;
+                            font-size: 17px;
+                            color: #e8e8ea;
+                            selection-background-color: #5a8fd4;
+                            selection-foreground-color: #ffffff;
+                            vertical-alignment: center;
+                            edited => {
+                                root.selected-index = 0;
+                                root.search-changed(self.text);
+                            }
+                            key-pressed(event) => {
+                                if event.text == Key.Escape {
+                                    root.escape-pressed();
+                                    return accept;
+                                }
+                                if event.text == Key.DownArrow {
+                                    if root.selected-index < root.results.length - 1 {
+                                        root.selected-index += 1;
+                                    }
+                                    return accept;
+                                }
+                                if event.text == Key.UpArrow {
+                                    if root.selected-index > 0 {
+                                        root.selected-index -= 1;
+                                    }
+                                    return accept;
+                                }
+                                if event.text == Key.Return {
+                                    root.item-activated(root.selected-index);
+                                    return accept;
+                                }
+                                return reject;
+                            }
+                        }
+
+                        // Placeholder hint (visible when empty)
+                        if root.search-text == "": Text {
+                            width: 585px;
+                            x: 0px;
+                            text: "Search for apps, files, and folders.....";
+                            font-size: 17px;
+                            height: 33px;
+                            color: #82828f;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // ─── Divider ───
+            Rectangle {
+                height: 1px;
+                background: #3e3e42;
+            }
+
+            // ─── Content Area ───
+            Rectangle {
+                vertical-stretch: 1;
+                clip: true;
+
+                // ═══ SETTINGS VIEW ═══
+                if root.show-settings: ScrollView {
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+
+                        // Header
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text {
+                                text: "Settings";
+                                font-size: 18px;
+                                font-weight: 700;
+                                color: #e8e8ea;
+                            }
+                            // Back button
+                            Rectangle {
+                                width: 60px;
+                                height: 28px;
+                                border-radius: 6px;
+                                background: back-ta.has-hover ? #505053 : #434343;
+                                animate background { duration: 100ms; }
+                                Text {
+                                    text: "← Back";
+                                    font-size: 11px;
+                                    color: #e8e8ea;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                back-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.show-settings = false;
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Appearance Section ──
+                        Text {
+                            text: "APPEARANCE";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #808084;
+                            letter-spacing: 1px;
+                        }
+
+                        // Width & Height row
+                        HorizontalLayout {
+                            spacing: 12px;
+                            VerticalLayout {
+                                spacing: 4px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: "Width";
+                                    font-size: 11px;
+                                    color: #a0a0a4;
+                                }
+
+                                LineEdit {
+                                    text <=> root.cfg-width;
+                                }
+                            }
+
+                            VerticalLayout {
+                                spacing: 4px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: "Height";
+                                    font-size: 11px;
+                                    color: #a0a0a4;
+                                }
+
+                                LineEdit {
+                                    text <=> root.cfg-height;
+                                }
+                            }
+                        }
+
+                        // Font
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: "Font Family";
+                                font-size: 11px;
+                                color: #a0a0a4;
+                            }
+
+                            LineEdit {
+                                text <=> root.cfg-font;
+                            }
+                        }
+
+                        // Colors row
+                        HorizontalLayout {
+                            spacing: 12px;
+                            VerticalLayout {
+                                spacing: 4px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: "Background";
+                                    font-size: 11px;
+                                    color: #a0a0a4;
+                                }
+
+                                LineEdit {
+                                    text <=> root.cfg-bg;
+                                }
+                            }
+
+                            VerticalLayout {
+                                spacing: 4px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: "Border Color";
+                                    font-size: 11px;
+                                    color: #a0a0a4;
+                                }
+
+                                LineEdit {
+                                    text <=> root.cfg-border-color;
+                                }
+                            }
+                        }
+
+                        // Border row
+                        HorizontalLayout {
+                            spacing: 12px;
+                            VerticalLayout {
+                                spacing: 4px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: "Border Radius";
+                                    font-size: 11px;
+                                    color: #a0a0a4;
+                                }
+
+                                LineEdit {
+                                    text <=> root.cfg-border-radius;
+                                }
+                            }
+
+                            VerticalLayout {
+                                spacing: 4px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: "Border Width";
+                                    font-size: 11px;
+                                    color: #a0a0a4;
+                                }
+
+                                LineEdit {
+                                    text <=> root.cfg-border-width;
+                                }
+                            }
+                        }
+
+                        // ── Quick Access Section ──
+                        Text {
+                            text: "QUICK ACCESS";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #808084;
+                            letter-spacing: 1px;
+                        }
+
+                        for item[idx] in root.cfg-quick-access: HorizontalLayout {
+                            spacing: 12px;
+                            VerticalLayout {
+                                spacing: 4px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: "Name";
+                                    font-size: 10px;
+                                    color: #606064;
+                                }
+
+                                LineEdit {
+                                    text: item.name;
+                                    edited(val) => {
+                                        item.name = val;
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                spacing: 4px;
+                                horizontal-stretch: 2;
+                                Text {
+                                    text: "Path";
+                                    font-size: 10px;
+                                    color: #606064;
+                                }
+
+                                LineEdit {
+                                    text: item.path;
+                                    edited(val) => {
+                                        item.path = val;
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                spacing: 4px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: "Icon";
+                                    font-size: 10px;
+                                    color: #606064;
+                                }
+
+                                LineEdit {
+                                    text: item.icon;
+                                    edited(val) => {
+                                        item.icon = val;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Save button
+                        HorizontalLayout {
+                            alignment: end;
+                            Rectangle {
+                                width: 80px;
+                                height: 32px;
+                                border-radius: 8px;
+                                background: save-ta.has-hover ? #4a8ae6 : #5a9fff;
+                                animate background { duration: 100ms; }
+                                Text {
+                                    text: "Save";
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    color: #ffffff;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                save-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.save-settings();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ═══ SEARCH RESULTS ═══
+                if !root.show-settings && root.results.length > 0: ScrollView {
+                    VerticalLayout {
+                        padding: 6px;
+                        spacing: 2px;
+                        for result[idx] in root.results: Rectangle {
+                            height: 52px;
+                            border-radius: 8px;
+                            background: idx == root.selected-index ? #454548 : transparent;
+                            animate background { duration: 80ms; }
+                            HorizontalLayout {
+                                spacing: 0px;
+                                // Blue left accent bar for selected item
+                                Rectangle {
+                                    y: 12px;
+                                    width: 3px;
+                                    height: 25px;
+                                    border-radius: 2px;
+                                    background: idx == root.selected-index ? #5a9fff : transparent;
+                                    animate background { duration: 80ms; }
+                                }
+
+                                Rectangle {
+                                    width: 12px;
+                                }
+
+                                // App icon (colored rounded square)
+                                Rectangle {
+                                    width: 36px;
+                                    height: 36px;
+                                    border-radius: 8px;
+                                    background: #2a2a2d;
+                                    y: 7px;
+
+                                    // Real icon from executable
+                                    if result.has-icon: Image {
+                                        source: result.icon-image;
+                                        width: 24px;
+                                        height: 24px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        image-fit: contain;
+                                    }
+
+                                    // Fallback: generic app icon
+                                    if !result.has-icon: Image {
+                                        source: @image-url("assets/apps.svg");
+                                        width: 22px;
+                                        height: 22px;
+                                        colorize: #808084;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 12px;
+                                }
+
+                                // Name & Type label
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: 2px;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: result.name;
+                                        font-size: 14px;
+                                        font-weight: 500;
+                                        color: #e8e8ea;
+                                        overflow: elide;
+                                    }
+
+                                    Text {
+                                        text: "App";
+                                        font-size: 11px;
+                                        color: #6b9fff;
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 12px;
+                                }
+                            }
+
+                            TouchArea {
+                                mouse-cursor: MouseCursor.pointer;
+                                clicked => {
+                                    root.selected-index = idx;
+                                    root.item-activated(idx);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ─── Empty State ───
+                if !root.show-settings && root.results.length == 0 && root.search-text != "": Rectangle {
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        Text {
+                            text: "No results found";
+                            font-size: 15px;
+                            color: #808084;
+                            horizontal-alignment: center;
+                        }
+
+                        Text {
+                            text: "Try a different search term";
+                            font-size: 12px;
+                            color: #a0a0a4;
+                            horizontal-alignment: center;
+                        }
+                    }
+                }
+
+                // ─── Default State (no search) ───
+                if !root.show-settings && root.search-text == "": VerticalLayout {
+                    padding: 24px;
+                    padding-top: 20px;
+                    spacing: 8px;
+                    alignment: LayoutAlignment.space-between;
+
+                    // Quick Access header
+                    Text {
+                        text: "QUICK ACCESS";
+                        visible: false;
+                        wrap: TextWrap.no-wrap;
+                        font-size: 11px;
+                        font-weight: 700;
+                        accessible-role: AccessibleRole.none;
+                        color: #808084;
+                        letter-spacing: 1px;
+                    }
+
+                    // Quick Access grid
+                    HorizontalLayout {
+                        spacing: 50px;
+                        alignment: center;
+
+                        // Browser
+                        VerticalLayout {
+                            spacing: 6px;
+                            alignment: center;
+                            Rectangle {
+                                width: 52px;
+                                height: 52px;
+                                border-radius: 12px;
+                                background: browser-ta.has-hover ? #505053 : #434343;
+                                animate background { duration: 120ms; }
+                                Image {
+                                    source: @image-url("assets/world.svg");
+                                    width: 28px;
+                                    height: 28px;
+                                    colorize: browser-ta.has-hover ? #ffffff : #c7c7c7;
+                                    animate colorize { duration: 120ms; }
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                browser-ta := TouchArea {
+                                    clicked => {
+                                        root.quick-access-activated("browser");
+                                    }
+                                    mouse-cursor: pointer;
+                                }
+                            }
+
+                            Text {
+                                text: "Browser";
+                                font-size: 10px;
+                                color: #a0a0a4;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        // Terminal
+                        VerticalLayout {
+                            spacing: 6px;
+                            alignment: center;
+                            Rectangle {
+                                width: 52px;
+                                height: 52px;
+                                border-radius: 12px;
+                                background: terminal-ta.has-hover ? #505053 : #434343;
+                                animate background { duration: 120ms; }
+                                Image {
+                                    source: @image-url("assets/terminal.svg");
+                                    width: 28px;
+                                    height: 28px;
+                                    colorize: terminal-ta.has-hover ? #ffffff : #c7c7c7;
+                                    animate colorize { duration: 120ms; }
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                terminal-ta := TouchArea {
+                                    clicked => {
+                                        root.quick-access-activated("terminal");
+                                    }
+                                    mouse-cursor: pointer;
+                                }
+                            }
+
+                            Text {
+                                text: "Terminal";
+                                font-size: 10px;
+                                color: #a0a0a4;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        // Files
+                        VerticalLayout {
+                            spacing: 6px;
+                            alignment: center;
+                            Rectangle {
+                                width: 52px;
+                                height: 52px;
+                                border-radius: 12px;
+                                background: files-ta.has-hover ? #505053 : #434343;
+                                animate background { duration: 120ms; }
+                                Image {
+                                    source: @image-url("assets/folder-open.svg");
+                                    width: 28px;
+                                    height: 28px;
+                                    colorize: files-ta.has-hover ? #ffffff : #c7c7c7;
+                                    animate colorize { duration: 120ms; }
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                files-ta := TouchArea {
+                                    clicked => {
+                                        root.quick-access-activated("files");
+                                    }
+                                    mouse-cursor: pointer;
+                                }
+                            }
+
+                            Text {
+                                text: "Files";
+                                font-size: 10px;
+                                color: #a0a0a4;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        // Settings
+                        VerticalLayout {
+                            spacing: 6px;
+                            alignment: center;
+                            Rectangle {
+                                width: 52px;
+                                height: 52px;
+                                border-radius: 12px;
+                                background: settings-ta.has-hover ? #505053 : #434343;
+                                animate background { duration: 120ms; }
+                                Image {
+                                    source: @image-url("assets/settings-2.svg");
+                                    width: 28px;
+                                    height: 28px;
+                                    colorize: settings-ta.has-hover ? #ffffff : #c7c7c7;
+                                    animate colorize { duration: 120ms; }
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                settings-ta := TouchArea {
+                                    clicked => {
+                                        root.quick-access-activated("settings");
+                                    }
+                                    mouse-cursor: pointer;
+                                }
+                            }
+
+                            Text {
+                                text: "Settings";
+                                font-size: 10px;
+                                color: #a0a0a4;
+                                horizontal-alignment: center;
+                            }
+                        }
+
+                        // Code
+                        VerticalLayout {
+                            spacing: 6px;
+                            alignment: center;
+                            Rectangle {
+                                width: 52px;
+                                height: 52px;
+                                border-radius: 12px;
+                                background: code-ta.has-hover ? #505053 : #434343;
+                                animate background { duration: 120ms; }
+                                Image {
+                                    source: @image-url("assets/code.svg");
+                                    width: 28px;
+                                    height: 28px;
+                                    colorize: code-ta.has-hover ? #ffffff : #c7c7c7;
+                                    animate colorize { duration: 120ms; }
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                code-ta := TouchArea {
+                                    clicked => {
+                                        root.quick-access-activated("code");
+                                    }
+                                    mouse-cursor: pointer;
+                                }
+                            }
+
+                            Text {
+                                text: "Code";
+                                font-size: 10px;
+                                color: #a0a0a4;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Spacer
+                    Rectangle {
+                        height: 8px;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        HorizontalLayout {
+                            width: 22px;
+                            height: 22px;
+                            Rectangle {
+                                width: 100%;
+                                background: root.show-settings ? #5a9fff : settings-footer-ta.has-hover ? #505053 : #3a3a3d;
+                                border-radius: 4px;
+                                animate background { duration: 100ms; }
+                                settings-footer-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.show-settings = !root.show-settings;
+                                    }
+                                }
+
+                                Image {
+                                    source: @image-url("assets/settings-2.svg");
+                                    width: 14px;
+                                    height: 14px;
+                                    colorize: root.show-settings ? #ffffff : settings-footer-ta.has-hover ? #e8e8ea : #a0a0a4;
+                                }
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 24px;
+                            alignment: end;
+                            HorizontalLayout {
+                                spacing: 6px;
+                                padding-top: 4px;
+                                HorizontalLayout {
+                                    spacing: 0;
+                                    Image {
+                                        source: @image-url("assets/arrowup.svg");
+                                        width: 14px;
+                                        height: 14px;
+                                        colorize: #a0a0a4;
+                                    }
+
+                                    Image {
+                                        source: @image-url("assets/arrowdown.svg");
+                                        width: 14px;
+                                        height: 14px;
+                                        colorize: #a0a0a4;
+                                    }
+                                }
+
+                                Text {
+                                    text: "Navigate";
+                                    font-size: 11px;
+                                    color: #a0a0a4;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                padding-top: 4px;
+                                Image {
+                                    source: @image-url("assets/enter.svg");
+                                    width: 14px;
+                                    height: 14px;
+                                    colorize: #a0a0a4;
+                                }
+
+                                Text {
+                                    text: "Open";
+                                    font-size: 11px;
+                                    color: #a0a0a4;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 6px;
+                                padding-top: 4px;
+                                Rectangle {
+                                    width: 28px;
+                                    height: 18px;
+                                    border-radius: 4px;
+                                    border-width: 1px;
+                                    border-color: #a0a0a4;
+                                    Text {
+                                        text: "Esc";
+                                        font-size: 9px;
+                                        color: #a0a0a4;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                Text {
+                                    text: "Close";
+                                    font-size: 11px;
+                                    color: #a0a0a4;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
