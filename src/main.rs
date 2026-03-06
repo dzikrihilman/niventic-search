@@ -11,9 +11,6 @@ use std::cell::RefCell;
 
 slint::include_modules!();
 
-/// Off-screen position to simulate hiding the window
-const OFF_SCREEN: PhysicalPosition = PhysicalPosition::new(-9999, -9999);
-
 /// Calculate center position dynamically based on primary monitor and window size
 fn center_position(win_w: i32, win_h: i32) -> PhysicalPosition {
     use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
@@ -72,6 +69,35 @@ fn main() -> Result<(), slint::PlatformError> {
     // Shared visibility flag
     let is_visible = std::rc::Rc::new(std::cell::Cell::new(true));
 
+    // System Tray Setup
+    use tray_icon::{TrayIconBuilder, menu::{Menu, MenuItem, PredefinedMenuItem}};
+    let tray_menu = Menu::new();
+    let show_i = MenuItem::new("Show Niventic", true, None);
+    let settings_i = MenuItem::new("Settings", true, None);
+    let quit_i = MenuItem::new("Quit", true, None);
+
+    let _ = tray_menu.append_items(&[
+        &show_i,
+        &PredefinedMenuItem::separator(),
+        &settings_i,
+        &PredefinedMenuItem::separator(),
+        &quit_i,
+    ]);
+
+    let _tray_icon = TrayIconBuilder::new()
+        .with_menu(Box::new(tray_menu))
+        .with_tooltip("Niventic Launcher")
+        .with_icon(generate_tray_icon())
+        .build()
+        .unwrap_or_else(|e| {
+            eprintln!("[niventic] Failed to build tray icon: {}", e);
+            // Return a dummy if it fails (not possible since it's inside unwrap_or_else, wait we can just handle error gracefully by dropping)
+            panic!("Tray builder failed");
+        });
+
+    let tray_event_receiver = tray_icon::TrayIconEvent::receiver();
+    let tray_menu_receiver = tray_icon::menu::MenuEvent::receiver();
+
     // 4. Start global hotkey listener in background thread
     let hotkey_rx = hotkey::start_listener(modifiers, vk_code);
 
@@ -80,7 +106,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let vis = is_visible.clone();
     main_window.on_escape_pressed(move || {
         if let Some(w) = window_weak.upgrade() {
-            w.window().set_position(OFF_SCREEN);
+            let _ = w.hide();
             vis.set(false);
             eprintln!("[niventic] Window hidden (Escape)");
         }
@@ -130,7 +156,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 launch_app(app);
 
                 // Hide the window after launching
-                w.window().set_position(OFF_SCREEN);
+                let _ = w.hide();
                 vis.set(false);
                 w.set_search_text(SharedString::from(""));
                 w.set_selected_index(0);
@@ -162,7 +188,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
             // Hide the window after launching
             if let Some(w) = window_weak.upgrade() {
-                w.window().set_position(OFF_SCREEN);
+                let _ = w.hide();
                 vis.set(false);
                 w.set_search_text(SharedString::from(""));
                 w.set_selected_index(0);
@@ -180,6 +206,7 @@ fn main() -> Result<(), slint::PlatformError> {
     main_window.on_save_settings(move || {
         if let Some(w) = window_weak.upgrade() {
             let mut cfg = config_for_save.borrow_mut();
+            cfg.run_at_startup = w.get_cfg_run_at_startup();
             cfg.appearance.width = w.get_cfg_width().to_string().parse().unwrap_or(800);
             cfg.appearance.height = w.get_cfg_height().to_string().parse().unwrap_or(500);
             cfg.appearance.font = w.get_cfg_font().to_string();
@@ -203,6 +230,12 @@ fn main() -> Result<(), slint::PlatformError> {
 
             config::save_config(&cfg);
             apply_appearance(&w, &cfg.appearance);
+            
+            // Apply Run at Startup registry changes
+            if let Err(e) = apply_run_at_startup(cfg.run_at_startup) {
+                eprintln!("[niventic] Failed to set run-at-startup registry: {e}");
+            }
+
             eprintln!("[niventic] Settings saved!");
             w.set_show_settings(false);
         }
@@ -224,6 +257,65 @@ fn main() -> Result<(), slint::PlatformError> {
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(50),
         move || {
+            // === Tray Icon & Menu Events ===
+            if let Ok(event) = tray_event_receiver.try_recv() {
+                match event {
+                    tray_icon::TrayIconEvent::Click { button: tray_icon::MouseButton::Left, .. } => {
+                        if let Some(w) = window_weak.upgrade() {
+                            let sz = w.window().size();
+                            w.window().set_position(center_position(sz.width as i32, sz.height as i32));
+                            let _ = w.show();
+                            vis.set(true);
+                            *shown_at_clone.borrow_mut() = Some(std::time::Instant::now());
+                            
+                            let hwnd = { *our_hwnd.borrow() };
+                            if let Some(our) = hwnd {
+                                unsafe {
+                                    let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(our);
+                                }
+                            }
+                            w.invoke_focus_search();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(event) = tray_menu_receiver.try_recv() {
+                if event.id == show_i.id() {
+                    if let Some(w) = window_weak.upgrade() {
+                        let sz = w.window().size();
+                        w.window().set_position(center_position(sz.width as i32, sz.height as i32));
+                        let _ = w.show();
+                        vis.set(true);
+                        *shown_at_clone.borrow_mut() = Some(std::time::Instant::now());
+                        let hwnd = { *our_hwnd.borrow() };
+                        if let Some(our) = hwnd {
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(our);
+                            }
+                        }
+                        w.invoke_focus_search();
+                    }
+                } else if event.id == settings_i.id() {
+                    if let Some(w) = window_weak.upgrade() {
+                        let sz = w.window().size();
+                        w.window().set_position(center_position(sz.width as i32, sz.height as i32));
+                        let _ = w.show();
+                        vis.set(true);
+                        w.set_show_settings(true);
+                        *shown_at_clone.borrow_mut() = Some(std::time::Instant::now());
+                        let hwnd = { *our_hwnd.borrow() };
+                        if let Some(our) = hwnd {
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(our);
+                            }
+                        }
+                    }
+                } else if event.id == quit_i.id() {
+                    slint::quit_event_loop().unwrap();
+                }
+            }
+
             // === Focus loss detection ===
             if vis.get() {
                 let shown_time = *shown_at_clone.borrow();
@@ -251,7 +343,7 @@ fn main() -> Result<(), slint::PlatformError> {
                             };
                             if fg != our && !fg.is_invalid() && fg.0 != std::ptr::null_mut() {
                                 if let Some(w) = window_weak.upgrade() {
-                                    w.window().set_position(OFF_SCREEN);
+                                    let _ = w.hide();
                                     vis.set(false);
                                     w.set_search_text(SharedString::from(""));
                                     w.set_selected_index(0);
@@ -271,7 +363,7 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Ok(hotkey::HotkeyEvent::Toggle) = hotkey_rx.try_recv() {
                 if let Some(w) = window_weak.upgrade() {
                     if vis.get() {
-                        w.window().set_position(OFF_SCREEN);
+                        let _ = w.hide();
                         vis.set(false);
                         *shown_at_clone.borrow_mut() = None;
                         eprintln!("[niventic] Window hidden");
@@ -287,6 +379,7 @@ fn main() -> Result<(), slint::PlatformError> {
                             sz.width as i32,
                             sz.height as i32,
                         ));
+                        let _ = w.show();
                         vis.set(true);
                         *shown_at_clone.borrow_mut() = Some(std::time::Instant::now());
 
@@ -321,6 +414,30 @@ fn main() -> Result<(), slint::PlatformError> {
     // 9. Show the window centered and run the event loop
     main_window.show()?;
 
+    // Hide from Windows Taskbar by setting WS_EX_TOOLWINDOW
+    use raw_window_handle::HasWindowHandle;
+    if let Ok(handle) = main_window.window().window_handle().window_handle() {
+        if let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() {
+            let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+                    SetWindowPos, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+                };
+                let mut style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+                style |= WS_EX_TOOLWINDOW.0 as i32;
+                style &= !(WS_EX_APPWINDOW.0 as i32);
+                SetWindowLongW(hwnd, GWL_EXSTYLE, style);
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE
+                );
+            }
+        }
+    }
+
     // Set position and focus after a brief delay so window().size() is accurate
     let window_weak = main_window.as_weak();
     let shown_at_init = shown_at.clone();
@@ -333,7 +450,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
-    slint::run_event_loop()?;
+    slint::run_event_loop_until_quit()?;
 
     Ok(())
 }
@@ -402,6 +519,7 @@ fn guess_icon(name: &str) -> &'static str {
 
 /// Bind config string values to Slint properties (for settings UI editing).
 fn bind_config_strings(w: &AppWindow, cfg: &config::AppConfig) {
+    w.set_cfg_run_at_startup(cfg.run_at_startup);
     w.set_cfg_width(SharedString::from(cfg.appearance.width.to_string()));
     w.set_cfg_height(SharedString::from(cfg.appearance.height.to_string()));
     w.set_cfg_font(SharedString::from(&cfg.appearance.font));
@@ -431,4 +549,47 @@ fn parse_hex_color(hex: &str) -> slint::Color {
     } else {
         slint::Color::from_rgb_u8(45, 45, 48)
     }
+}
+
+/// Generates the system tray icon from the embedded logo
+fn generate_tray_icon() -> tray_icon::Icon {
+    let icon_data = include_bytes!("../ui/assets/logo.png");
+    let image = image::load_from_memory(icon_data)
+        .expect("Failed to load logo.png")
+        .into_rgba8();
+
+    let (width, height) = image.dimensions();
+    let rgba = image.into_raw();
+    tray_icon::Icon::from_rgba(rgba, width, height).unwrap()
+}
+
+/// Applies or removes the NiventicLauncher registry key for Run at Startup.
+fn apply_run_at_startup(enable: bool) -> std::io::Result<()> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = hkcu.open_subkey_with_flags(
+        r#"Software\Microsoft\Windows\CurrentVersion\Run"#,
+        KEY_SET_VALUE | KEY_QUERY_VALUE,
+    )?;
+
+    let app_name = "NiventicLauncher";
+
+    if enable {
+        let exe_path = std::env::current_exe()?;
+        let path_str = exe_path.to_string_lossy().to_string();
+        // Set the value (will overwrite if exists)
+        run_key.set_value(app_name, &path_str)?;
+        eprintln!("[niventic] Enabled Run at Startup: {}", path_str);
+    } else {
+        // Only delete if it exists to avoid error
+        let existing: Result<String, _> = run_key.get_value(app_name);
+        if existing.is_ok() {
+            run_key.delete_value(app_name)?;
+            eprintln!("[niventic] Disabled Run at Startup");
+        }
+    }
+
+    Ok(())
 }

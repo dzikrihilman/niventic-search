@@ -1,4 +1,4 @@
-import { ScrollView, VerticalBox, LineEdit } from "std-widgets.slint";
+import { ScrollView, VerticalBox, LineEdit, Switch } from "std-widgets.slint";
 
 // Data model for a single search result item
 export struct SearchResult {
@@ -18,10 +18,11 @@ export struct QuickAccessEntry {
 
 export component AppWindow inherits Window {
     title: "Niventic Launcher";
-    width: 800px;
-    height: 500px;
+    width: root.cfg-width.to-float() * 1px;
+    height: root.cfg-height.to-float() * 1px;
     no-frame: true;
     always-on-top: true;
+    icon: @image-url("assets/logo.png");
     background: transparent;
     default-font-family: "JetBrainsMono Nerd Font";
     
@@ -40,6 +41,7 @@ export component AppWindow inherits Window {
     in-out property <bool> show-settings: false;
 
     // Appearance settings (string form for settings UI editing)
+    in-out property <bool> cfg-run-at-startup: false;
     in-out property <string> cfg-width: "800";
     in-out property <string> cfg-height: "500";
     in-out property <string> cfg-font: "JetBrainsMono Nerd Font";
@@ -200,6 +202,24 @@ export component AppWindow inherits Window {
                                         root.show-settings = false;
                                     }
                                 }
+                            }
+                        }
+
+                        // ── System Section ──
+                        Text {
+                            text: "SYSTEM";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #808084;
+                            letter-spacing: 1px;
+                        }
+
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 12px;
+                            Switch {
+                                text: "Run Niventic at System Startup";
+                                checked <=> root.cfg-run-at-startup;
                             }
                         }
 

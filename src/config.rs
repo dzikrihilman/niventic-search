@@ -6,11 +6,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 /// Application configuration, persisted in %APPDATA%/niventic/config.toml
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
+    #[serde(default = "default_run_at_startup")]
+    pub run_at_startup: bool,
     pub hotkey: HotkeyConfig,
     #[serde(default)]
     pub appearance: AppearanceConfig,
     #[serde(default)]
     pub quick_access: Vec<QuickAccessItem>,
+}
+
+fn default_run_at_startup() -> bool {
+    false
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -40,6 +46,7 @@ pub struct QuickAccessItem {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            run_at_startup: false,
             hotkey: HotkeyConfig {
                 modifier: "Ctrl".to_string(),
                 key: "Space".to_string(),
