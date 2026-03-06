@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod config;
 mod hotkey;
 mod icons;
@@ -11,8 +13,43 @@ use std::cell::RefCell;
 
 slint::include_modules!();
 
-/// Off-screen position to simulate hiding the window
-const OFF_SCREEN: PhysicalPosition = PhysicalPosition::new(-9999, -9999);
+/// Apply WS_EX_TOOLWINDOW style to hide the window from the taskbar and Alt+Tab.
+/// Must be called after every `w.show()` because Slint may reset the extended style.
+fn hide_from_taskbar(hwnd: windows::Win32::Foundation::HWND) {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+            SetWindowPos, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+        };
+        let mut style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        style |= WS_EX_TOOLWINDOW.0 as i32;
+        style &= !(WS_EX_APPWINDOW.0 as i32);
+        SetWindowLongW(hwnd, GWL_EXSTYLE, style);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Load a Quick Access icon as a `slint::Image`. It first checks if the name matches a bundled 
+/// default icon. If so, it loads it from embedded bytes. Otherwise, it attempts to load from 
+/// the user's `icons_dir`.
+fn load_qa_icon(name: &str) -> slint::Image {
+    match name {
+        "world.svg" => slint::Image::load_from_svg_data(include_bytes!("../ui/assets/world.svg")).unwrap_or_default(),
+        "terminal.svg" => slint::Image::load_from_svg_data(include_bytes!("../ui/assets/terminal.svg")).unwrap_or_default(),
+        "folder-open.svg" => slint::Image::load_from_svg_data(include_bytes!("../ui/assets/folder-open.svg")).unwrap_or_default(),
+        "settings-2.svg" => slint::Image::load_from_svg_data(include_bytes!("../ui/assets/settings-2.svg")).unwrap_or_default(),
+        "code.svg" => slint::Image::load_from_svg_data(include_bytes!("../ui/assets/code.svg")).unwrap_or_default(),
+        _ => {
+            let icon_path = config::icons_dir().join(name);
+            slint::Image::load_from_path(&icon_path).unwrap_or_default()
+        }
+    }
+}
 
 /// Calculate center position dynamically based on primary monitor and window size
 fn center_position(win_w: i32, win_h: i32) -> PhysicalPosition {
@@ -52,12 +89,14 @@ fn main() -> Result<(), slint::PlatformError> {
         bind_config_strings(&main_window, &cfg);
         apply_appearance(&main_window, &cfg.appearance);
 
-        // Bind quick access entries
+        // Bind quick access entries with loaded icons
         let qa_entries: Vec<QuickAccessEntry> = cfg.quick_access.iter().map(|qa| {
+            let icon_img = load_qa_icon(&qa.icon);
             QuickAccessEntry {
                 name: SharedString::from(&qa.name),
                 path: SharedString::from(&qa.path),
                 icon: SharedString::from(&qa.icon),
+                icon_image: icon_img,
             }
         }).collect();
         let qa_model = Rc::new(VecModel::from(qa_entries));
@@ -72,6 +111,35 @@ fn main() -> Result<(), slint::PlatformError> {
     // Shared visibility flag
     let is_visible = std::rc::Rc::new(std::cell::Cell::new(true));
 
+    // System Tray Setup
+    use tray_icon::{TrayIconBuilder, menu::{Menu, MenuItem, PredefinedMenuItem}};
+    let tray_menu = Menu::new();
+    let show_i = MenuItem::new("Show Niventic", true, None);
+    let settings_i = MenuItem::new("Settings", true, None);
+    let quit_i = MenuItem::new("Quit", true, None);
+
+    let _ = tray_menu.append_items(&[
+        &show_i,
+        &PredefinedMenuItem::separator(),
+        &settings_i,
+        &PredefinedMenuItem::separator(),
+        &quit_i,
+    ]);
+
+    let _tray_icon = TrayIconBuilder::new()
+        .with_menu(Box::new(tray_menu))
+        .with_tooltip("Niventic Launcher")
+        .with_icon(generate_tray_icon())
+        .build()
+        .unwrap_or_else(|e| {
+            eprintln!("[niventic] Failed to build tray icon: {}", e);
+            // Return a dummy if it fails (not possible since it's inside unwrap_or_else, wait we can just handle error gracefully by dropping)
+            panic!("Tray builder failed");
+        });
+
+    let tray_event_receiver = tray_icon::TrayIconEvent::receiver();
+    let tray_menu_receiver = tray_icon::menu::MenuEvent::receiver();
+
     // 4. Start global hotkey listener in background thread
     let hotkey_rx = hotkey::start_listener(modifiers, vk_code);
 
@@ -80,7 +148,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let vis = is_visible.clone();
     main_window.on_escape_pressed(move || {
         if let Some(w) = window_weak.upgrade() {
-            w.window().set_position(OFF_SCREEN);
+            let _ = w.hide();
             vis.set(false);
             eprintln!("[niventic] Window hidden (Escape)");
         }
@@ -130,7 +198,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 launch_app(app);
 
                 // Hide the window after launching
-                w.window().set_position(OFF_SCREEN);
+                let _ = w.hide();
                 vis.set(false);
                 w.set_search_text(SharedString::from(""));
                 w.set_selected_index(0);
@@ -162,7 +230,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
             // Hide the window after launching
             if let Some(w) = window_weak.upgrade() {
-                w.window().set_position(OFF_SCREEN);
+                let _ = w.hide();
                 vis.set(false);
                 w.set_search_text(SharedString::from(""));
                 w.set_selected_index(0);
@@ -180,6 +248,7 @@ fn main() -> Result<(), slint::PlatformError> {
     main_window.on_save_settings(move || {
         if let Some(w) = window_weak.upgrade() {
             let mut cfg = config_for_save.borrow_mut();
+            cfg.run_at_startup = w.get_cfg_run_at_startup();
             cfg.appearance.width = w.get_cfg_width().to_string().parse().unwrap_or(800);
             cfg.appearance.height = w.get_cfg_height().to_string().parse().unwrap_or(500);
             cfg.appearance.font = w.get_cfg_font().to_string();
@@ -187,6 +256,7 @@ fn main() -> Result<(), slint::PlatformError> {
             cfg.appearance.border_radius = w.get_cfg_border_radius().to_string().parse().unwrap_or(14.0);
             cfg.appearance.border_width = w.get_cfg_border_width().to_string().parse().unwrap_or(0.5);
             cfg.appearance.border_color = w.get_cfg_border_color().to_string();
+            cfg.appearance.opacity = w.get_cfg_opacity().to_string().parse().unwrap_or(0.9);
 
             // Save quick access from model
             let qa_model = w.get_cfg_quick_access();
@@ -201,10 +271,86 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             cfg.quick_access = qa_items;
 
+            // Save hotkey config
+            cfg.hotkey.modifier = w.get_cfg_hotkey_modifier().to_string();
+            cfg.hotkey.key = w.get_cfg_hotkey_key().to_string();
+
             config::save_config(&cfg);
             apply_appearance(&w, &cfg.appearance);
+            
+            // Apply Run at Startup registry changes
+            if let Err(e) = apply_run_at_startup(cfg.run_at_startup) {
+                eprintln!("[niventic] Failed to set run-at-startup registry: {e}");
+            }
+
             eprintln!("[niventic] Settings saved!");
             w.set_show_settings(false);
+        }
+    });
+
+    // 7d. Handle color picker
+    let window_weak = main_window.as_weak();
+    main_window.on_pick_color(move |which| {
+        if let Some(w) = window_weak.upgrade() {
+            if let Some(color) = open_color_dialog() {
+                let hex = format!("#{:02x}{:02x}{:02x}", color.0, color.1, color.2);
+                if which == "bg" {
+                    w.set_cfg_bg(SharedString::from(&hex));
+                    w.set_app_bg(slint::Brush::from(slint::Color::from_rgb_u8(color.0, color.1, color.2)));
+                } else if which == "border" {
+                    w.set_cfg_border_color(SharedString::from(&hex));
+                    w.set_app_border_color(slint::Brush::from(slint::Color::from_rgb_u8(color.0, color.1, color.2)));
+                }
+            }
+        }
+    });
+
+    // 7e. Handle file picker for Quick Access path
+    let window_weak = main_window.as_weak();
+    main_window.on_pick_qa_path(move |idx| {
+        if let Some(w) = window_weak.upgrade() {
+            let dialog = rfd::FileDialog::new().set_title("Select Application or File");
+            if let Some(path) = dialog.pick_file() {
+                let qa_model = w.get_cfg_quick_access();
+                if let Some(mut item) = qa_model.row_data(idx as usize) {
+                    item.path = SharedString::from(path.to_string_lossy().as_ref());
+                    qa_model.set_row_data(idx as usize, item);
+                }
+            }
+        }
+    });
+
+    // 7f. Handle file picker for Quick Access icon (copies to app icons dir)
+    let window_weak = main_window.as_weak();
+    main_window.on_pick_qa_icon(move |idx| {
+        if let Some(w) = window_weak.upgrade() {
+            let dialog = rfd::FileDialog::new()
+                .set_title("Select Icon Image")
+                .add_filter("Images", &["svg", "png", "ico", "jpg", "jpeg"]);
+            if let Some(src_path) = dialog.pick_file() {
+                // Copy icon to app icons directory
+                let icons_dir = config::icons_dir();
+                if let Err(e) = std::fs::create_dir_all(&icons_dir) {
+                    eprintln!("[niventic] Failed to create icons dir: {e}");
+                    return;
+                }
+                if let Some(file_name) = src_path.file_name() {
+                    let dest = icons_dir.join(file_name);
+                    if let Err(e) = std::fs::copy(&src_path, &dest) {
+                        eprintln!("[niventic] Failed to copy icon: {e}");
+                        return;
+                    }
+                    // Store just the filename (will be resolved from icons_dir at load time)
+                    let name_str = file_name.to_string_lossy().to_string();
+                    let qa_model = w.get_cfg_quick_access();
+                    if let Some(mut item) = qa_model.row_data(idx as usize) {
+                        item.icon = SharedString::from(&name_str);
+                        item.icon_image = load_qa_icon(&name_str);
+                        qa_model.set_row_data(idx as usize, item);
+                    }
+                    eprintln!("[niventic] Icon copied to: {}", dest.display());
+                }
+            }
         }
     });
 
@@ -212,15 +358,132 @@ fn main() -> Result<(), slint::PlatformError> {
     let window_weak = main_window.as_weak();
     let vis = is_visible.clone();
     let timer = slint::Timer::default();
+
+    // Track when window was last shown (grace period for focus check)
+    let shown_at: Rc<RefCell<Option<std::time::Instant>>> = Rc::new(RefCell::new(None));
+    let shown_at_clone = shown_at.clone();
+
+    // Cache our HWND (found lazily on first use via raw_window_handle)
+    let our_hwnd: Rc<RefCell<Option<windows::Win32::Foundation::HWND>>> = Rc::new(RefCell::new(None));
+
     timer.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(50),
         move || {
+            // === Tray Icon & Menu Events ===
+            if let Ok(event) = tray_event_receiver.try_recv() {
+                match event {
+                    tray_icon::TrayIconEvent::Click { button: tray_icon::MouseButton::Left, .. } => {
+                        if let Some(w) = window_weak.upgrade() {
+                            let sz = w.window().size();
+                            w.window().set_position(center_position(sz.width as i32, sz.height as i32));
+                            // Apply tool window style BEFORE show to prevent taskbar flash
+                            let hwnd = { *our_hwnd.borrow() };
+                            if let Some(our) = hwnd { hide_from_taskbar(our); }
+                            let _ = w.show();
+                            vis.set(true);
+                            *shown_at_clone.borrow_mut() = Some(std::time::Instant::now());
+                            if let Some(our) = hwnd {
+                                unsafe {
+                                    let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(our);
+                                }
+                            }
+                            w.invoke_focus_search();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Ok(event) = tray_menu_receiver.try_recv() {
+                if event.id == show_i.id() {
+                    if let Some(w) = window_weak.upgrade() {
+                        let sz = w.window().size();
+                        w.window().set_position(center_position(sz.width as i32, sz.height as i32));
+                        // Apply tool window style BEFORE show to prevent taskbar flash
+                        let hwnd = { *our_hwnd.borrow() };
+                        if let Some(our) = hwnd { hide_from_taskbar(our); }
+                        let _ = w.show();
+                        vis.set(true);
+                        *shown_at_clone.borrow_mut() = Some(std::time::Instant::now());
+                        if let Some(our) = hwnd {
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(our);
+                            }
+                        }
+                        w.invoke_focus_search();
+                    }
+                } else if event.id == settings_i.id() {
+                    if let Some(w) = window_weak.upgrade() {
+                        let sz = w.window().size();
+                        w.window().set_position(center_position(sz.width as i32, sz.height as i32));
+                        // Apply tool window style BEFORE show to prevent taskbar flash
+                        let hwnd = { *our_hwnd.borrow() };
+                        if let Some(our) = hwnd { hide_from_taskbar(our); }
+                        let _ = w.show();
+                        vis.set(true);
+                        w.set_show_settings(true);
+                        *shown_at_clone.borrow_mut() = Some(std::time::Instant::now());
+                        if let Some(our) = hwnd {
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(our);
+                            }
+                        }
+                    }
+                } else if event.id == quit_i.id() {
+                    slint::quit_event_loop().unwrap();
+                }
+            }
+
+            // === Focus loss detection ===
+            if vis.get() {
+                let shown_time = *shown_at_clone.borrow();
+                if let Some(t) = shown_time {
+                    // Only check after 150ms grace period to let SetForegroundWindow sink in
+                    if t.elapsed() > std::time::Duration::from_millis(150) {
+                        let hwnd = {
+                            let mut cached = our_hwnd.borrow_mut();
+                            if cached.is_none() {
+                                if let Some(w) = window_weak.upgrade() {
+                                    use raw_window_handle::HasWindowHandle;
+                                    if let Ok(handle) = w.window().window_handle().window_handle() {
+                                        if let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() {
+                                            *cached = Some(windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _));
+                                        }
+                                    }
+                                }
+                            }
+                            *cached
+                        };
+
+                        if let Some(our) = hwnd {
+                            let fg = unsafe {
+                                windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()
+                            };
+                            if fg != our && !fg.is_invalid() && fg.0 != std::ptr::null_mut() {
+                                if let Some(w) = window_weak.upgrade() {
+                                    let _ = w.hide();
+                                    vis.set(false);
+                                    w.set_search_text(SharedString::from(""));
+                                    w.set_selected_index(0);
+                                    w.set_show_settings(false);
+                                    let model = Rc::new(VecModel::<SearchResult>::default());
+                                    w.set_results(ModelRc::from(model));
+                                    *shown_at_clone.borrow_mut() = None;
+                                    eprintln!("[niventic] Window hidden (focus lost)");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // === Hotkey toggle ===
             if let Ok(hotkey::HotkeyEvent::Toggle) = hotkey_rx.try_recv() {
                 if let Some(w) = window_weak.upgrade() {
                     if vis.get() {
-                        w.window().set_position(OFF_SCREEN);
+                        let _ = w.hide();
                         vis.set(false);
+                        *shown_at_clone.borrow_mut() = None;
                         eprintln!("[niventic] Window hidden");
                     } else {
                         // Reset search state when showing
@@ -234,14 +497,30 @@ fn main() -> Result<(), slint::PlatformError> {
                             sz.width as i32,
                             sz.height as i32,
                         ));
-                        vis.set(true);
 
-                        // Force foreground focus (Windows blocks bg windows from stealing focus)
-                        unsafe {
-                            use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow};
-                            use windows::core::w;
-                            if let Ok(hwnd) = FindWindowW(None, w!("Niventic Launcher")) {
-                                let _ = SetForegroundWindow(hwnd);
+                        // Resolve HWND (cached after first use)
+                        let hwnd = {
+                            let mut cached = our_hwnd.borrow_mut();
+                            if cached.is_none() {
+                                use raw_window_handle::HasWindowHandle;
+                                if let Ok(handle) = w.window().window_handle().window_handle() {
+                                    if let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() {
+                                        *cached = Some(windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _));
+                                    }
+                                }
+                            }
+                            *cached
+                        };
+
+                        // Apply tool window style BEFORE show to prevent taskbar flash
+                        if let Some(our) = hwnd { hide_from_taskbar(our); }
+                        let _ = w.show();
+                        vis.set(true);
+                        *shown_at_clone.borrow_mut() = Some(std::time::Instant::now());
+                        
+                        if let Some(our) = hwnd {
+                            unsafe {
+                                let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(our);
                             }
                         }
 
@@ -256,17 +535,28 @@ fn main() -> Result<(), slint::PlatformError> {
     // 9. Show the window centered and run the event loop
     main_window.show()?;
 
+    // Hide from Windows Taskbar by setting WS_EX_TOOLWINDOW
+    use raw_window_handle::HasWindowHandle;
+    if let Ok(handle) = main_window.window().window_handle().window_handle() {
+        if let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() {
+            let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
+            hide_from_taskbar(hwnd);
+        }
+    }
+
     // Set position and focus after a brief delay so window().size() is accurate
     let window_weak = main_window.as_weak();
+    let shown_at_init = shown_at.clone();
     slint::Timer::single_shot(std::time::Duration::from_millis(100), move || {
         if let Some(w) = window_weak.upgrade() {
             let sz = w.window().size();
             w.window().set_position(center_position(sz.width as i32, sz.height as i32));
             w.invoke_focus_search();
+            *shown_at_init.borrow_mut() = Some(std::time::Instant::now());
         }
     });
 
-    slint::run_event_loop()?;
+    slint::run_event_loop_until_quit()?;
 
     Ok(())
 }
@@ -335,6 +625,7 @@ fn guess_icon(name: &str) -> &'static str {
 
 /// Bind config string values to Slint properties (for settings UI editing).
 fn bind_config_strings(w: &AppWindow, cfg: &config::AppConfig) {
+    w.set_cfg_run_at_startup(cfg.run_at_startup);
     w.set_cfg_width(SharedString::from(cfg.appearance.width.to_string()));
     w.set_cfg_height(SharedString::from(cfg.appearance.height.to_string()));
     w.set_cfg_font(SharedString::from(&cfg.appearance.font));
@@ -342,6 +633,9 @@ fn bind_config_strings(w: &AppWindow, cfg: &config::AppConfig) {
     w.set_cfg_border_radius(SharedString::from(format!("{}", cfg.appearance.border_radius)));
     w.set_cfg_border_width(SharedString::from(format!("{}", cfg.appearance.border_width)));
     w.set_cfg_border_color(SharedString::from(&cfg.appearance.border_color));
+    w.set_cfg_opacity(SharedString::from(format!("{}", cfg.appearance.opacity)));
+    w.set_cfg_hotkey_modifier(SharedString::from(&cfg.hotkey.modifier));
+    w.set_cfg_hotkey_key(SharedString::from(&cfg.hotkey.key));
 }
 
 /// Apply typed appearance values to Slint properties (for live rendering).
@@ -351,6 +645,7 @@ fn apply_appearance(w: &AppWindow, appearance: &config::AppearanceConfig) {
     w.set_app_border_width(appearance.border_width);
     w.set_app_border_color(slint::Brush::from(parse_hex_color(&appearance.border_color)));
     w.set_app_font(SharedString::from(&appearance.font));
+    w.set_app_opacity(appearance.opacity);
 }
 
 /// Parse a hex color string like "#2d2d30" to slint::Color.
@@ -364,4 +659,75 @@ fn parse_hex_color(hex: &str) -> slint::Color {
     } else {
         slint::Color::from_rgb_u8(45, 45, 48)
     }
+}
+
+/// Opens the native Windows color picker dialog and returns (R, G, B).
+fn open_color_dialog() -> Option<(u8, u8, u8)> {
+    use windows::Win32::UI::Controls::Dialogs::{
+        ChooseColorW, CHOOSECOLORW, CC_FULLOPEN, CC_RGBINIT,
+    };
+    use windows::Win32::Foundation::COLORREF;
+
+    let mut custom_colors = [COLORREF(0u32); 16];
+    let mut cc = CHOOSECOLORW {
+        lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
+        rgbResult: COLORREF(0),
+        lpCustColors: custom_colors.as_mut_ptr(),
+        Flags: CC_FULLOPEN | CC_RGBINIT,
+        ..Default::default()
+    };
+
+    let ok = unsafe { ChooseColorW(&mut cc) };
+    if ok.as_bool() {
+        let rgb = cc.rgbResult.0;
+        let r = (rgb & 0xFF) as u8;
+        let g = ((rgb >> 8) & 0xFF) as u8;
+        let b = ((rgb >> 16) & 0xFF) as u8;
+        Some((r, g, b))
+    } else {
+        None
+    }
+}
+
+/// Generates the system tray icon from the embedded logo
+fn generate_tray_icon() -> tray_icon::Icon {
+    let icon_data = include_bytes!("../ui/assets/logo.png");
+    let image = image::load_from_memory(icon_data)
+        .expect("Failed to load logo.png")
+        .into_rgba8();
+
+    let (width, height) = image.dimensions();
+    let rgba = image.into_raw();
+    tray_icon::Icon::from_rgba(rgba, width, height).unwrap()
+}
+
+/// Applies or removes the NiventicLauncher registry key for Run at Startup.
+fn apply_run_at_startup(enable: bool) -> std::io::Result<()> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let run_key = hkcu.open_subkey_with_flags(
+        r#"Software\Microsoft\Windows\CurrentVersion\Run"#,
+        KEY_SET_VALUE | KEY_QUERY_VALUE,
+    )?;
+
+    let app_name = "NiventicLauncher";
+
+    if enable {
+        let exe_path = std::env::current_exe()?;
+        let path_str = exe_path.to_string_lossy().to_string();
+        // Set the value (will overwrite if exists)
+        run_key.set_value(app_name, &path_str)?;
+        eprintln!("[niventic] Enabled Run at Startup: {}", path_str);
+    } else {
+        // Only delete if it exists to avoid error
+        let existing: Result<String, _> = run_key.get_value(app_name);
+        if existing.is_ok() {
+            run_key.delete_value(app_name)?;
+            eprintln!("[niventic] Disabled Run at Startup");
+        }
+    }
+
+    Ok(())
 }

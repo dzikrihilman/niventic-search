@@ -2,13 +2,19 @@
 name = "niventic"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
-slint = "1.15.0"
+slint = { version = "1.15", features = ["raw-window-handle-06"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
 lnk = "0.5"
+raw-window-handle = "0.6"
+tray-icon = "0.21.3"
+winreg = "0.55.0"
+image = "0.25.9"
+rfd = "0.15"
 
 [dependencies.windows]
 version = "0.61"
@@ -19,7 +25,9 @@ features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem",
+    "Win32_UI_Controls_Dialogs",
 ]
 
 [build-dependencies]
 slint-build = "1.15.0"
+winres = "0.1.12"

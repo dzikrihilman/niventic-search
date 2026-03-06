@@ -1,6 +1,5 @@
-import { ScrollView, VerticalBox, LineEdit } from "std-widgets.slint";
+import { ScrollView, VerticalBox, LineEdit, Switch } from "std-widgets.slint";
 
-// Data model for a single search result item
 export struct SearchResult {
     name: string,
     path: string,
@@ -9,24 +8,23 @@ export struct SearchResult {
     has-icon: bool,
 }
 
-// Data model for a quick access entry
 export struct QuickAccessEntry {
     name: string,
     path: string,
     icon: string,
+    icon-image: image,
 }
 
 export component AppWindow inherits Window {
     title: "Niventic Launcher";
-    width: 800px;
-    height: 500px;
+    width: root.cfg-width.to-float() * 1px;
+    height: root.cfg-height.to-float() * 1px;
     no-frame: true;
     always-on-top: true;
+    icon: @image-url("assets/logo.png");
     background: transparent;
     default-font-family: "JetBrainsMono Nerd Font";
     
-
-    // === Public API ===
     in property <[SearchResult]> results: [];
     in-out property <string> search-text: "";
     in-out property <int> selected-index: 0;
@@ -36,10 +34,9 @@ export component AppWindow inherits Window {
     callback quick-access-activated(string);
     callback save-settings();
 
-    // === Settings State ===
     in-out property <bool> show-settings: false;
 
-    // Appearance settings (string form for settings UI editing)
+    in-out property <bool> cfg-run-at-startup: false;
     in-out property <string> cfg-width: "800";
     in-out property <string> cfg-height: "500";
     in-out property <string> cfg-font: "JetBrainsMono Nerd Font";
@@ -47,23 +44,24 @@ export component AppWindow inherits Window {
     in-out property <string> cfg-border-radius: "14";
     in-out property <string> cfg-border-width: "0.5";
     in-out property <string> cfg-border-color: "#a9a9a9";
-
-    // Typed properties for live rendering (set from Rust)
+    in-out property <string> cfg-opacity: "0.9";
+    in-out property <string> cfg-hotkey-modifier: "Alt";
+    in-out property <string> cfg-hotkey-key: "Space";
+    in-out property <bool> hotkey-recording: false;
     in-out property <brush> app-bg: #2d2d30;
     in-out property <length> app-border-radius: 14px;
     in-out property <length> app-border-width: 0.5px;
     in-out property <brush> app-border-color: #a9a9a9;
     in-out property <string> app-font: "JetBrainsMono Nerd Font";
-
-    // Quick Access settings
+    in-out property <float> app-opacity: 0.9;
+    callback pick-color(string);
+    callback pick-qa-path(int);
+    callback pick-qa-icon(int);
     in-out property <[QuickAccessEntry]> cfg-quick-access: [];
-
-    // Focus the search input
     public function focus-search() {
         search-input.focus();
     }
 
-    // === Main container ===
     Rectangle {
         x: 8px;
         y: 8px;
@@ -73,11 +71,9 @@ export component AppWindow inherits Window {
         border-radius: root.app-border-radius;
         border-width: root.app-border-width;
         border-color: root.app-border-color;
-        opacity: 0.9;
+        opacity: root.app-opacity;
         VerticalLayout {
             spacing: 0px;
-
-            // ─── Search Bar ───
             Rectangle {
                 height: 56px;
                 HorizontalLayout {
@@ -98,7 +94,6 @@ export component AppWindow inherits Window {
                         colorize: #909094;
                     }
 
-                    // Search input + placeholder wrapper
                     Rectangle {
                         horizontal-stretch: 1;
                         search-input := TextInput {
@@ -139,7 +134,6 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // Placeholder hint (visible when empty)
                         if root.search-text == "": Text {
                             width: 585px;
                             x: 0px;
@@ -153,24 +147,19 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // ─── Divider ───
             Rectangle {
                 height: 1px;
                 background: #3e3e42;
             }
 
-            // ─── Content Area ───
             Rectangle {
                 vertical-stretch: 1;
                 clip: true;
 
-                // ═══ SETTINGS VIEW ═══
                 if root.show-settings: ScrollView {
                     VerticalLayout {
                         padding: 20px;
                         spacing: 16px;
-
-                        // Header
                         HorizontalLayout {
                             alignment: space-between;
                             Text {
@@ -179,7 +168,6 @@ export component AppWindow inherits Window {
                                 font-weight: 700;
                                 color: #e8e8ea;
                             }
-                            // Back button
                             Rectangle {
                                 width: 60px;
                                 height: 28px;
@@ -202,8 +190,125 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                        Text {
+                            text: "SYSTEM";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #808084;
+                            letter-spacing: 1px;
+                        }
 
-                        // ── Appearance Section ──
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: 12px;
+                            Switch {
+                                text: "Run Niventic at System Startup";
+                                checked <=> root.cfg-run-at-startup;
+                            }
+                        }
+                        Text {
+                            text: "HOTKEY";
+                            font-size: 11px;
+                            font-weight: 700;
+                            color: #808084;
+                            letter-spacing: 1px;
+                        }
+                        Rectangle {
+                            height: 40px;
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: root.hotkey-recording ? #5a9fff : #3e3e42;
+                            background: root.hotkey-recording ? #2a3a5a : #1e1e20;
+                            animate background { duration: 150ms; }
+                            animate border-color { duration: 150ms; }
+                            HorizontalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                alignment: center;
+                                spacing: 8px;
+                                Text {
+                                    text: root.hotkey-recording ? "⏵ Press a key combination..." : root.cfg-hotkey-modifier + " + " + root.cfg-hotkey-key;
+                                    font-size: 14px;
+                                    font-weight: 500;
+                                    color: root.hotkey-recording ? #5a9fff : #e8e8ea;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    animate color { duration: 150ms; }
+                                }
+                            }
+
+                            hotkey-fs := FocusScope {
+                                key-pressed(event) => {
+                                    if root.hotkey-recording {
+                                        if event.text != Key.Control && event.text != Key.Alt && event.text != Key.Shift && event.text != Key.Meta {
+                                            if event.modifiers.alt {
+                                                root.cfg-hotkey-modifier = "Alt";
+                                            } else if event.modifiers.control {
+                                                root.cfg-hotkey-modifier = "Ctrl";
+                                            } else if event.modifiers.shift {
+                                                root.cfg-hotkey-modifier = "Shift";
+                                            } else if event.modifiers.meta {
+                                                root.cfg-hotkey-modifier = "Win";
+                                            }
+
+                                            if event.text == " " {
+                                                root.cfg-hotkey-key = "Space";
+                                            } else if event.text == Key.Return {
+                                                root.cfg-hotkey-key = "Enter";
+                                            } else if event.text == Key.Tab {
+                                                root.cfg-hotkey-key = "Tab";
+                                            } else if event.text == Key.F1 {
+                                                root.cfg-hotkey-key = "F1";
+                                            } else if event.text == Key.F2 {
+                                                root.cfg-hotkey-key = "F2";
+                                            } else if event.text == Key.F3 {
+                                                root.cfg-hotkey-key = "F3";
+                                            } else if event.text == Key.F4 {
+                                                root.cfg-hotkey-key = "F4";
+                                            } else if event.text == Key.F5 {
+                                                root.cfg-hotkey-key = "F5";
+                                            } else if event.text == Key.F6 {
+                                                root.cfg-hotkey-key = "F6";
+                                            } else if event.text == Key.F7 {
+                                                root.cfg-hotkey-key = "F7";
+                                            } else if event.text == Key.F8 {
+                                                root.cfg-hotkey-key = "F8";
+                                            } else if event.text == Key.F9 {
+                                                root.cfg-hotkey-key = "F9";
+                                            } else if event.text == Key.F10 {
+                                                root.cfg-hotkey-key = "F10";
+                                            } else if event.text == Key.F11 {
+                                                root.cfg-hotkey-key = "F11";
+                                            } else if event.text == Key.F12 {
+                                                root.cfg-hotkey-key = "F12";
+                                            } else {
+                                                root.cfg-hotkey-key = event.text;
+                                            }
+                                            root.hotkey-recording = false;
+                                        }
+                                        return accept;
+                                    }
+                                    return reject;
+                                }
+                            }
+
+                            hotkey-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.hotkey-recording = !root.hotkey-recording;
+                                    if root.hotkey-recording {
+                                        hotkey-fs.focus();
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "⚠ Restart app to apply hotkey changes";
+                            font-size: 10px;
+                            color: #808084;
+                            font-italic: true;
+                        }
                         Text {
                             text: "APPEARANCE";
                             font-size: 11px;
@@ -211,8 +316,6 @@ export component AppWindow inherits Window {
                             color: #808084;
                             letter-spacing: 1px;
                         }
-
-                        // Width & Height row
                         HorizontalLayout {
                             spacing: 12px;
                             VerticalLayout {
@@ -243,8 +346,6 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
-
-                        // Font
                         VerticalLayout {
                             spacing: 4px;
                             Text {
@@ -257,8 +358,6 @@ export component AppWindow inherits Window {
                                 text <=> root.cfg-font;
                             }
                         }
-
-                        // Colors row
                         HorizontalLayout {
                             spacing: 12px;
                             VerticalLayout {
@@ -270,8 +369,26 @@ export component AppWindow inherits Window {
                                     color: #a0a0a4;
                                 }
 
-                                LineEdit {
-                                    text <=> root.cfg-bg;
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    LineEdit {
+                                        text <=> root.cfg-bg;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Rectangle {
+                                        width: 32px;
+                                        height: 32px;
+                                        border-radius: 6px;
+                                        border-width: 1px;
+                                        border-color: #555;
+                                        background: root.app-bg;
+                                        bg-pick-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.pick-color("bg");
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
@@ -284,13 +401,29 @@ export component AppWindow inherits Window {
                                     color: #a0a0a4;
                                 }
 
-                                LineEdit {
-                                    text <=> root.cfg-border-color;
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    LineEdit {
+                                        text <=> root.cfg-border-color;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Rectangle {
+                                        width: 32px;
+                                        height: 32px;
+                                        border-radius: 6px;
+                                        border-width: 1px;
+                                        border-color: #555;
+                                        background: root.app-border-color;
+                                        border-pick-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.pick-color("border");
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
-
-                        // Border row
                         HorizontalLayout {
                             spacing: 12px;
                             VerticalLayout {
@@ -306,7 +439,6 @@ export component AppWindow inherits Window {
                                     text <=> root.cfg-border-radius;
                                 }
                             }
-
                             VerticalLayout {
                                 spacing: 4px;
                                 horizontal-stretch: 1;
@@ -320,9 +452,21 @@ export component AppWindow inherits Window {
                                     text <=> root.cfg-border-width;
                                 }
                             }
-                        }
+                            VerticalLayout {
+                                spacing: 4px;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: "Opacity";
+                                    font-size: 11px;
+                                    color: #a0a0a4;
+                                }
 
-                        // ── Quick Access Section ──
+                                LineEdit {
+                                    text <=> root.cfg-opacity;
+                                    placeholder-text: "0.0 - 1.0";
+                                }
+                            }
+                        }
                         Text {
                             text: "QUICK ACCESS";
                             font-size: 11px;
@@ -332,7 +476,7 @@ export component AppWindow inherits Window {
                         }
 
                         for item[idx] in root.cfg-quick-access: HorizontalLayout {
-                            spacing: 12px;
+                            spacing: 8px;
                             VerticalLayout {
                                 spacing: 4px;
                                 horizontal-stretch: 1;
@@ -359,10 +503,35 @@ export component AppWindow inherits Window {
                                     color: #606064;
                                 }
 
-                                LineEdit {
-                                    text: item.path;
-                                    edited(val) => {
-                                        item.path = val;
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    LineEdit {
+                                        text: item.path;
+                                        horizontal-stretch: 1;
+                                        edited(val) => {
+                                            item.path = val;
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: 32px;
+                                        height: 32px;
+                                        border-radius: 6px;
+                                        background: qa-path-ta.has-hover ? #505053 : #3a3a3d;
+                                        animate background { duration: 100ms; }
+                                        Image {
+                                            source: @image-url("assets/folder-open.svg");
+                                            width: 16px;
+                                            height: 16px;
+                                            colorize: qa-path-ta.has-hover ? #e8e8ea : #a0a0a4;
+                                            animate colorize { duration: 100ms; }
+                                        }
+
+                                        qa-path-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.pick-qa-path(idx);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -376,16 +545,39 @@ export component AppWindow inherits Window {
                                     color: #606064;
                                 }
 
-                                LineEdit {
-                                    text: item.icon;
-                                    edited(val) => {
-                                        item.icon = val;
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    LineEdit {
+                                        text: item.icon;
+                                        horizontal-stretch: 1;
+                                        edited(val) => {
+                                            item.icon = val;
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: 32px;
+                                        height: 32px;
+                                        border-radius: 6px;
+                                        background: qa-icon-ta.has-hover ? #505053 : #3a3a3d;
+                                        animate background { duration: 100ms; }
+                                        Image {
+                                            source: @image-url("assets/folder-open.svg");
+                                            width: 16px;
+                                            height: 16px;
+                                            colorize: qa-icon-ta.has-hover ? #e8e8ea : #a0a0a4;
+                                            animate colorize { duration: 100ms; }
+                                        }
+
+                                        qa-icon-ta := TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.pick-qa-icon(idx);
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-
-                        // Save button
                         HorizontalLayout {
                             alignment: end;
                             Rectangle {
@@ -413,8 +605,6 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-
-                // ═══ SEARCH RESULTS ═══
                 if !root.show-settings && root.results.length > 0: ScrollView {
                     VerticalLayout {
                         padding: 6px;
@@ -426,7 +616,6 @@ export component AppWindow inherits Window {
                             animate background { duration: 80ms; }
                             HorizontalLayout {
                                 spacing: 0px;
-                                // Blue left accent bar for selected item
                                 Rectangle {
                                     y: 12px;
                                     width: 3px;
@@ -439,8 +628,6 @@ export component AppWindow inherits Window {
                                 Rectangle {
                                     width: 12px;
                                 }
-
-                                // App icon (colored rounded square)
                                 Rectangle {
                                     width: 36px;
                                     height: 36px;
@@ -448,7 +635,6 @@ export component AppWindow inherits Window {
                                     background: #2a2a2d;
                                     y: 7px;
 
-                                    // Real icon from executable
                                     if result.has-icon: Image {
                                         source: result.icon-image;
                                         width: 24px;
@@ -458,7 +644,6 @@ export component AppWindow inherits Window {
                                         image-fit: contain;
                                     }
 
-                                    // Fallback: generic app icon
                                     if !result.has-icon: Image {
                                         source: @image-url("assets/apps.svg");
                                         width: 22px;
@@ -472,8 +657,6 @@ export component AppWindow inherits Window {
                                 Rectangle {
                                     width: 12px;
                                 }
-
-                                // Name & Type label
                                 VerticalLayout {
                                     alignment: center;
                                     spacing: 2px;
@@ -508,8 +691,6 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-
-                // ─── Empty State ───
                 if !root.show-settings && root.results.length == 0 && root.search-text != "": Rectangle {
                     VerticalLayout {
                         alignment: center;
@@ -529,15 +710,11 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-
-                // ─── Default State (no search) ───
                 if !root.show-settings && root.search-text == "": VerticalLayout {
                     padding: 24px;
                     padding-top: 20px;
                     spacing: 8px;
                     alignment: LayoutAlignment.space-between;
-
-                    // Quick Access header
                     Text {
                         text: "QUICK ACCESS";
                         visible: false;
@@ -548,194 +725,44 @@ export component AppWindow inherits Window {
                         color: #808084;
                         letter-spacing: 1px;
                     }
-
-                    // Quick Access grid
                     HorizontalLayout {
                         spacing: 50px;
                         alignment: center;
-
-                        // Browser
-                        VerticalLayout {
+                        for qa-item[qa-idx] in root.cfg-quick-access: VerticalLayout {
                             spacing: 6px;
                             alignment: center;
                             Rectangle {
                                 width: 52px;
                                 height: 52px;
                                 border-radius: 12px;
-                                background: browser-ta.has-hover ? #505053 : #434343;
+                                background: qa-grid-ta.has-hover ? #505053 : #434343;
                                 animate background { duration: 120ms; }
                                 Image {
-                                    source: @image-url("assets/world.svg");
+                                    source: qa-item.icon-image;
                                     width: 28px;
                                     height: 28px;
-                                    colorize: browser-ta.has-hover ? #ffffff : #c7c7c7;
+                                    colorize: qa-grid-ta.has-hover ? #ffffff : #c7c7c7;
                                     animate colorize { duration: 120ms; }
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
                                 }
 
-                                browser-ta := TouchArea {
+                                qa-grid-ta := TouchArea {
                                     clicked => {
-                                        root.quick-access-activated("browser");
+                                        root.quick-access-activated(qa-item.name);
                                     }
                                     mouse-cursor: pointer;
                                 }
                             }
 
                             Text {
-                                text: "Browser";
-                                font-size: 10px;
-                                color: #a0a0a4;
-                                horizontal-alignment: center;
-                            }
-                        }
-
-                        // Terminal
-                        VerticalLayout {
-                            spacing: 6px;
-                            alignment: center;
-                            Rectangle {
-                                width: 52px;
-                                height: 52px;
-                                border-radius: 12px;
-                                background: terminal-ta.has-hover ? #505053 : #434343;
-                                animate background { duration: 120ms; }
-                                Image {
-                                    source: @image-url("assets/terminal.svg");
-                                    width: 28px;
-                                    height: 28px;
-                                    colorize: terminal-ta.has-hover ? #ffffff : #c7c7c7;
-                                    animate colorize { duration: 120ms; }
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-
-                                terminal-ta := TouchArea {
-                                    clicked => {
-                                        root.quick-access-activated("terminal");
-                                    }
-                                    mouse-cursor: pointer;
-                                }
-                            }
-
-                            Text {
-                                text: "Terminal";
-                                font-size: 10px;
-                                color: #a0a0a4;
-                                horizontal-alignment: center;
-                            }
-                        }
-
-                        // Files
-                        VerticalLayout {
-                            spacing: 6px;
-                            alignment: center;
-                            Rectangle {
-                                width: 52px;
-                                height: 52px;
-                                border-radius: 12px;
-                                background: files-ta.has-hover ? #505053 : #434343;
-                                animate background { duration: 120ms; }
-                                Image {
-                                    source: @image-url("assets/folder-open.svg");
-                                    width: 28px;
-                                    height: 28px;
-                                    colorize: files-ta.has-hover ? #ffffff : #c7c7c7;
-                                    animate colorize { duration: 120ms; }
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-
-                                files-ta := TouchArea {
-                                    clicked => {
-                                        root.quick-access-activated("files");
-                                    }
-                                    mouse-cursor: pointer;
-                                }
-                            }
-
-                            Text {
-                                text: "Files";
-                                font-size: 10px;
-                                color: #a0a0a4;
-                                horizontal-alignment: center;
-                            }
-                        }
-
-                        // Settings
-                        VerticalLayout {
-                            spacing: 6px;
-                            alignment: center;
-                            Rectangle {
-                                width: 52px;
-                                height: 52px;
-                                border-radius: 12px;
-                                background: settings-ta.has-hover ? #505053 : #434343;
-                                animate background { duration: 120ms; }
-                                Image {
-                                    source: @image-url("assets/settings-2.svg");
-                                    width: 28px;
-                                    height: 28px;
-                                    colorize: settings-ta.has-hover ? #ffffff : #c7c7c7;
-                                    animate colorize { duration: 120ms; }
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-
-                                settings-ta := TouchArea {
-                                    clicked => {
-                                        root.quick-access-activated("settings");
-                                    }
-                                    mouse-cursor: pointer;
-                                }
-                            }
-
-                            Text {
-                                text: "Settings";
-                                font-size: 10px;
-                                color: #a0a0a4;
-                                horizontal-alignment: center;
-                            }
-                        }
-
-                        // Code
-                        VerticalLayout {
-                            spacing: 6px;
-                            alignment: center;
-                            Rectangle {
-                                width: 52px;
-                                height: 52px;
-                                border-radius: 12px;
-                                background: code-ta.has-hover ? #505053 : #434343;
-                                animate background { duration: 120ms; }
-                                Image {
-                                    source: @image-url("assets/code.svg");
-                                    width: 28px;
-                                    height: 28px;
-                                    colorize: code-ta.has-hover ? #ffffff : #c7c7c7;
-                                    animate colorize { duration: 120ms; }
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-
-                                code-ta := TouchArea {
-                                    clicked => {
-                                        root.quick-access-activated("code");
-                                    }
-                                    mouse-cursor: pointer;
-                                }
-                            }
-
-                            Text {
-                                text: "Code";
+                                text: qa-item.name;
                                 font-size: 10px;
                                 color: #a0a0a4;
                                 horizontal-alignment: center;
                             }
                         }
                     }
-
-                    // Spacer
                     Rectangle {
                         height: 8px;
                     }

@@ -3,14 +3,19 @@ use std::fs;
 use std::path::PathBuf;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
-/// Application configuration, persisted in %APPDATA%/niventic/config.toml
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
+    #[serde(default = "default_run_at_startup")]
+    pub run_at_startup: bool,
     pub hotkey: HotkeyConfig,
     #[serde(default)]
     pub appearance: AppearanceConfig,
     #[serde(default)]
     pub quick_access: Vec<QuickAccessItem>,
+}
+
+fn default_run_at_startup() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -28,6 +33,12 @@ pub struct AppearanceConfig {
     pub border_radius: f32,
     pub border_width: f32,
     pub border_color: String,
+    #[serde(default = "default_opacity")]
+    pub opacity: f32,
+}
+
+fn default_opacity() -> f32 {
+    0.9
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -40,8 +51,9 @@ pub struct QuickAccessItem {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            run_at_startup: false,
             hotkey: HotkeyConfig {
-                modifier: "Ctrl".to_string(),
+                modifier: "Alt".to_string(),
                 key: "Space".to_string(),
             },
             appearance: AppearanceConfig::default(),
@@ -60,6 +72,7 @@ impl Default for AppearanceConfig {
             border_radius: 14.0,
             border_width: 0.5,
             border_color: "#a9a9a9".to_string(),
+            opacity: 0.9,
         }
     }
 }
@@ -97,9 +110,14 @@ impl QuickAccessItem {
 }
 
 /// Returns the path to the config directory: %APPDATA%/niventic/
-fn config_dir() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join("niventic")
+}
+
+/// Returns the path to the icons directory: %APPDATA%/niventic/icons/
+pub fn icons_dir() -> PathBuf {
+    config_dir().join("icons")
 }
 
 /// Returns the path to the config file: %APPDATA%/niventic/config.toml

@@ -38,6 +38,8 @@ pub fn start_listener(
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 if msg.message == WM_HOTKEY && msg.wParam.0 == HOTKEY_ID as usize {
+                    // ASFW_ANY (u32::MAX) allows our UI thread to become foreground
+                    let _ = windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(u32::MAX);
                     let _ = tx.send(HotkeyEvent::Toggle);
                 }
             }
