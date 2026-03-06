@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod config;
 mod hotkey;
 mod icons;
@@ -10,6 +12,44 @@ use std::rc::Rc;
 use std::cell::RefCell;
 
 slint::include_modules!();
+
+/// Apply WS_EX_TOOLWINDOW style to hide the window from the taskbar and Alt+Tab.
+/// Must be called after every `w.show()` because Slint may reset the extended style.
+fn hide_from_taskbar(hwnd: windows::Win32::Foundation::HWND) {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+            SetWindowPos, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+        };
+        let mut style = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        style |= WS_EX_TOOLWINDOW.0 as i32;
+        style &= !(WS_EX_APPWINDOW.0 as i32);
+        SetWindowLongW(hwnd, GWL_EXSTYLE, style);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Load a Quick Access icon as a `slint::Image`. It first checks if the name matches a bundled 
+/// default icon. If so, it loads it from embedded bytes. Otherwise, it attempts to load from 
+/// the user's `icons_dir`.
+fn load_qa_icon(name: &str) -> slint::Image {
+    match name {
+        "world.svg" => slint::Image::load_from_svg_data(include_bytes!("../ui/assets/world.svg")).unwrap_or_default(),
+        "terminal.svg" => slint::Image::load_from_svg_data(include_bytes!("../ui/assets/terminal.svg")).unwrap_or_default(),
+        "folder-open.svg" => slint::Image::load_from_svg_data(include_bytes!("../ui/assets/folder-open.svg")).unwrap_or_default(),
+        "settings-2.svg" => slint::Image::load_from_svg_data(include_bytes!("../ui/assets/settings-2.svg")).unwrap_or_default(),
+        "code.svg" => slint::Image::load_from_svg_data(include_bytes!("../ui/assets/code.svg")).unwrap_or_default(),
+        _ => {
+            let icon_path = config::icons_dir().join(name);
+            slint::Image::load_from_path(&icon_path).unwrap_or_default()
+        }
+    }
+}
 
 /// Calculate center position dynamically based on primary monitor and window size
 fn center_position(win_w: i32, win_h: i32) -> PhysicalPosition {
@@ -49,12 +89,14 @@ fn main() -> Result<(), slint::PlatformError> {
         bind_config_strings(&main_window, &cfg);
         apply_appearance(&main_window, &cfg.appearance);
 
-        // Bind quick access entries
+        // Bind quick access entries with loaded icons
         let qa_entries: Vec<QuickAccessEntry> = cfg.quick_access.iter().map(|qa| {
+            let icon_img = load_qa_icon(&qa.icon);
             QuickAccessEntry {
                 name: SharedString::from(&qa.name),
                 path: SharedString::from(&qa.path),
                 icon: SharedString::from(&qa.icon),
+                icon_image: icon_img,
             }
         }).collect();
         let qa_model = Rc::new(VecModel::from(qa_entries));
@@ -214,6 +256,7 @@ fn main() -> Result<(), slint::PlatformError> {
             cfg.appearance.border_radius = w.get_cfg_border_radius().to_string().parse().unwrap_or(14.0);
             cfg.appearance.border_width = w.get_cfg_border_width().to_string().parse().unwrap_or(0.5);
             cfg.appearance.border_color = w.get_cfg_border_color().to_string();
+            cfg.appearance.opacity = w.get_cfg_opacity().to_string().parse().unwrap_or(0.9);
 
             // Save quick access from model
             let qa_model = w.get_cfg_quick_access();
@@ -228,6 +271,10 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             cfg.quick_access = qa_items;
 
+            // Save hotkey config
+            cfg.hotkey.modifier = w.get_cfg_hotkey_modifier().to_string();
+            cfg.hotkey.key = w.get_cfg_hotkey_key().to_string();
+
             config::save_config(&cfg);
             apply_appearance(&w, &cfg.appearance);
             
@@ -238,6 +285,72 @@ fn main() -> Result<(), slint::PlatformError> {
 
             eprintln!("[niventic] Settings saved!");
             w.set_show_settings(false);
+        }
+    });
+
+    // 7d. Handle color picker
+    let window_weak = main_window.as_weak();
+    main_window.on_pick_color(move |which| {
+        if let Some(w) = window_weak.upgrade() {
+            if let Some(color) = open_color_dialog() {
+                let hex = format!("#{:02x}{:02x}{:02x}", color.0, color.1, color.2);
+                if which == "bg" {
+                    w.set_cfg_bg(SharedString::from(&hex));
+                    w.set_app_bg(slint::Brush::from(slint::Color::from_rgb_u8(color.0, color.1, color.2)));
+                } else if which == "border" {
+                    w.set_cfg_border_color(SharedString::from(&hex));
+                    w.set_app_border_color(slint::Brush::from(slint::Color::from_rgb_u8(color.0, color.1, color.2)));
+                }
+            }
+        }
+    });
+
+    // 7e. Handle file picker for Quick Access path
+    let window_weak = main_window.as_weak();
+    main_window.on_pick_qa_path(move |idx| {
+        if let Some(w) = window_weak.upgrade() {
+            let dialog = rfd::FileDialog::new().set_title("Select Application or File");
+            if let Some(path) = dialog.pick_file() {
+                let qa_model = w.get_cfg_quick_access();
+                if let Some(mut item) = qa_model.row_data(idx as usize) {
+                    item.path = SharedString::from(path.to_string_lossy().as_ref());
+                    qa_model.set_row_data(idx as usize, item);
+                }
+            }
+        }
+    });
+
+    // 7f. Handle file picker for Quick Access icon (copies to app icons dir)
+    let window_weak = main_window.as_weak();
+    main_window.on_pick_qa_icon(move |idx| {
+        if let Some(w) = window_weak.upgrade() {
+            let dialog = rfd::FileDialog::new()
+                .set_title("Select Icon Image")
+                .add_filter("Images", &["svg", "png", "ico", "jpg", "jpeg"]);
+            if let Some(src_path) = dialog.pick_file() {
+                // Copy icon to app icons directory
+                let icons_dir = config::icons_dir();
+                if let Err(e) = std::fs::create_dir_all(&icons_dir) {
+                    eprintln!("[niventic] Failed to create icons dir: {e}");
+                    return;
+                }
+                if let Some(file_name) = src_path.file_name() {
+                    let dest = icons_dir.join(file_name);
+                    if let Err(e) = std::fs::copy(&src_path, &dest) {
+                        eprintln!("[niventic] Failed to copy icon: {e}");
+                        return;
+                    }
+                    // Store just the filename (will be resolved from icons_dir at load time)
+                    let name_str = file_name.to_string_lossy().to_string();
+                    let qa_model = w.get_cfg_quick_access();
+                    if let Some(mut item) = qa_model.row_data(idx as usize) {
+                        item.icon = SharedString::from(&name_str);
+                        item.icon_image = load_qa_icon(&name_str);
+                        qa_model.set_row_data(idx as usize, item);
+                    }
+                    eprintln!("[niventic] Icon copied to: {}", dest.display());
+                }
+            }
         }
     });
 
@@ -264,11 +377,12 @@ fn main() -> Result<(), slint::PlatformError> {
                         if let Some(w) = window_weak.upgrade() {
                             let sz = w.window().size();
                             w.window().set_position(center_position(sz.width as i32, sz.height as i32));
+                            // Apply tool window style BEFORE show to prevent taskbar flash
+                            let hwnd = { *our_hwnd.borrow() };
+                            if let Some(our) = hwnd { hide_from_taskbar(our); }
                             let _ = w.show();
                             vis.set(true);
                             *shown_at_clone.borrow_mut() = Some(std::time::Instant::now());
-                            
-                            let hwnd = { *our_hwnd.borrow() };
                             if let Some(our) = hwnd {
                                 unsafe {
                                     let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(our);
@@ -285,10 +399,12 @@ fn main() -> Result<(), slint::PlatformError> {
                     if let Some(w) = window_weak.upgrade() {
                         let sz = w.window().size();
                         w.window().set_position(center_position(sz.width as i32, sz.height as i32));
+                        // Apply tool window style BEFORE show to prevent taskbar flash
+                        let hwnd = { *our_hwnd.borrow() };
+                        if let Some(our) = hwnd { hide_from_taskbar(our); }
                         let _ = w.show();
                         vis.set(true);
                         *shown_at_clone.borrow_mut() = Some(std::time::Instant::now());
-                        let hwnd = { *our_hwnd.borrow() };
                         if let Some(our) = hwnd {
                             unsafe {
                                 let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(our);
@@ -300,11 +416,13 @@ fn main() -> Result<(), slint::PlatformError> {
                     if let Some(w) = window_weak.upgrade() {
                         let sz = w.window().size();
                         w.window().set_position(center_position(sz.width as i32, sz.height as i32));
+                        // Apply tool window style BEFORE show to prevent taskbar flash
+                        let hwnd = { *our_hwnd.borrow() };
+                        if let Some(our) = hwnd { hide_from_taskbar(our); }
                         let _ = w.show();
                         vis.set(true);
                         w.set_show_settings(true);
                         *shown_at_clone.borrow_mut() = Some(std::time::Instant::now());
-                        let hwnd = { *our_hwnd.borrow() };
                         if let Some(our) = hwnd {
                             unsafe {
                                 let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(our);
@@ -379,11 +497,8 @@ fn main() -> Result<(), slint::PlatformError> {
                             sz.width as i32,
                             sz.height as i32,
                         ));
-                        let _ = w.show();
-                        vis.set(true);
-                        *shown_at_clone.borrow_mut() = Some(std::time::Instant::now());
 
-                        // Reliably steal focus using cached HWND
+                        // Resolve HWND (cached after first use)
                         let hwnd = {
                             let mut cached = our_hwnd.borrow_mut();
                             if cached.is_none() {
@@ -396,6 +511,12 @@ fn main() -> Result<(), slint::PlatformError> {
                             }
                             *cached
                         };
+
+                        // Apply tool window style BEFORE show to prevent taskbar flash
+                        if let Some(our) = hwnd { hide_from_taskbar(our); }
+                        let _ = w.show();
+                        vis.set(true);
+                        *shown_at_clone.borrow_mut() = Some(std::time::Instant::now());
                         
                         if let Some(our) = hwnd {
                             unsafe {
@@ -419,22 +540,7 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Ok(handle) = main_window.window().window_handle().window_handle() {
         if let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() {
             let hwnd = windows::Win32::Foundation::HWND(h.hwnd.get() as *mut _);
-            unsafe {
-                use windows::Win32::UI::WindowsAndMessaging::{
-                    GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
-                    SetWindowPos, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-                };
-                let mut style = GetWindowLongW(hwnd, GWL_EXSTYLE);
-                style |= WS_EX_TOOLWINDOW.0 as i32;
-                style &= !(WS_EX_APPWINDOW.0 as i32);
-                SetWindowLongW(hwnd, GWL_EXSTYLE, style);
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE
-                );
-            }
+            hide_from_taskbar(hwnd);
         }
     }
 
@@ -527,6 +633,9 @@ fn bind_config_strings(w: &AppWindow, cfg: &config::AppConfig) {
     w.set_cfg_border_radius(SharedString::from(format!("{}", cfg.appearance.border_radius)));
     w.set_cfg_border_width(SharedString::from(format!("{}", cfg.appearance.border_width)));
     w.set_cfg_border_color(SharedString::from(&cfg.appearance.border_color));
+    w.set_cfg_opacity(SharedString::from(format!("{}", cfg.appearance.opacity)));
+    w.set_cfg_hotkey_modifier(SharedString::from(&cfg.hotkey.modifier));
+    w.set_cfg_hotkey_key(SharedString::from(&cfg.hotkey.key));
 }
 
 /// Apply typed appearance values to Slint properties (for live rendering).
@@ -536,6 +645,7 @@ fn apply_appearance(w: &AppWindow, appearance: &config::AppearanceConfig) {
     w.set_app_border_width(appearance.border_width);
     w.set_app_border_color(slint::Brush::from(parse_hex_color(&appearance.border_color)));
     w.set_app_font(SharedString::from(&appearance.font));
+    w.set_app_opacity(appearance.opacity);
 }
 
 /// Parse a hex color string like "#2d2d30" to slint::Color.
@@ -548,6 +658,34 @@ fn parse_hex_color(hex: &str) -> slint::Color {
         slint::Color::from_rgb_u8(r, g, b)
     } else {
         slint::Color::from_rgb_u8(45, 45, 48)
+    }
+}
+
+/// Opens the native Windows color picker dialog and returns (R, G, B).
+fn open_color_dialog() -> Option<(u8, u8, u8)> {
+    use windows::Win32::UI::Controls::Dialogs::{
+        ChooseColorW, CHOOSECOLORW, CC_FULLOPEN, CC_RGBINIT,
+    };
+    use windows::Win32::Foundation::COLORREF;
+
+    let mut custom_colors = [COLORREF(0u32); 16];
+    let mut cc = CHOOSECOLORW {
+        lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
+        rgbResult: COLORREF(0),
+        lpCustColors: custom_colors.as_mut_ptr(),
+        Flags: CC_FULLOPEN | CC_RGBINIT,
+        ..Default::default()
+    };
+
+    let ok = unsafe { ChooseColorW(&mut cc) };
+    if ok.as_bool() {
+        let rgb = cc.rgbResult.0;
+        let r = (rgb & 0xFF) as u8;
+        let g = ((rgb >> 8) & 0xFF) as u8;
+        let b = ((rgb >> 16) & 0xFF) as u8;
+        Some((r, g, b))
+    } else {
+        None
     }
 }
 
