@@ -25,7 +25,7 @@ It provides a quick way to launch apps, search files, and access your favorite t
 Niventic is currently distributed as a standalone portable executable (`.exe`). **There is no installer needed.**
 
 ### Option 1: Download Pre-built Release (Recommended)
-1. Go to the **Releases** page on GitHub and download the latest `niventic.exe`.
+1. Go to the [Releases](https://github.com/dzikrihilman/niventic-search/releases) page on GitHub and download the latest `niventic.exe`.
 2. **Move the `.exe` to a permanent secure location** (for example: `C:\Niventic\` or `C:\Program Files\Niventic\`). *Do not leave it in your Downloads folder, as accidentally deleting the file will break the app and auto-start features.*
 3. Double-click `niventic.exe` to start the app.
 4. The launcher will run silently in the background (look for its icon in your system tray).
