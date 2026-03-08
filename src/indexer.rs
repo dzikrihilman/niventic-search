@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 use std::env;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Represents an indexed application entry.
 #[derive(Debug, Clone)]
@@ -49,6 +53,12 @@ pub fn scan_apps() -> Vec<AppEntry> {
         }
     }
 
+    // Scan desktop shortcuts and executable files to catch apps not exposed in Start Menu.
+    scan_desktop_entries(&mut entries);
+
+    // Fallback source for UWP/Store apps via AppsFolder IDs.
+    scan_uwp_apps(&mut entries);
+
     // Deduplicate by name (keep the first occurrence)
     let mut seen: HashMap<String, bool> = HashMap::new();
     entries.retain(|e| {
@@ -66,6 +76,106 @@ pub fn scan_apps() -> Vec<AppEntry> {
 
     eprintln!("[niventic] Indexed {} applications", entries.len());
     entries
+}
+
+/// Scan user/public desktop for .lnk and .exe entries.
+/// This is intentionally non-recursive to avoid expensive deep filesystem traversal.
+fn scan_desktop_entries(entries: &mut Vec<AppEntry>) {
+    let mut desktop_dirs: Vec<PathBuf> = Vec::new();
+
+    if let Some(user_desktop) = dirs::desktop_dir() {
+        desktop_dirs.push(user_desktop);
+    }
+
+    if let Ok(public_dir) = env::var("PUBLIC") {
+        desktop_dirs.push(PathBuf::from(public_dir).join("Desktop"));
+    }
+
+    for dir in desktop_dirs {
+        if !dir.exists() {
+            continue;
+        }
+
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                continue;
+            }
+
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+
+            if ext == "lnk" {
+                if let Some(app) = parse_lnk_file(&path) {
+                    entries.push(app);
+                }
+                continue;
+            }
+
+            if ext == "exe" {
+                if let Some(name) = path.file_stem().map(|s| s.to_string_lossy().to_string()) {
+                    entries.push(AppEntry {
+                        name,
+                        target_path: path.to_string_lossy().to_string(),
+                        lnk_path: None,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Scan UWP and Start apps using PowerShell `Get-StartApps`.
+/// We map AppID to `shell:AppsFolder\\<AppID>` so launch uses the shell route.
+fn scan_uwp_apps(entries: &mut Vec<AppEntry>) {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-StartApps | ForEach-Object {\"$($_.Name)`t$($_.AppID)\"}",
+        ])
+        // Avoid flashing a console window when background refresh runs.
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    let output = match output {
+        Ok(out) if out.status.success() => out,
+        _ => return,
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let mut parts = trimmed.splitn(2, '\t');
+        let name = parts.next().unwrap_or("").trim();
+        let app_id = parts.next().unwrap_or("").trim();
+
+        if name.is_empty() || app_id.is_empty() {
+            continue;
+        }
+
+        // Skip noise entries similar to shortcut filtering.
+        if is_noise_entry_name(name) {
+            continue;
+        }
+
+        entries.push(AppEntry {
+            name: name.to_string(),
+            target_path: format!("shell:AppsFolder\\{}", app_id),
+            lnk_path: None,
+        });
+    }
 }
 
 /// Recursively scan a directory for .lnk files and parse them.
@@ -99,14 +209,7 @@ fn parse_lnk_file(lnk_path: &Path) -> Option<AppEntry> {
     let name = lnk_path.file_stem()?.to_string_lossy().to_string();
 
     // Skip common non-app shortcuts
-    let lower = name.to_lowercase();
-    if lower.contains("uninstall")
-        || lower.contains("readme")
-        || lower.contains("help")
-        || lower.contains("license")
-        || lower.contains("changelog")
-        || lower.contains("release notes")
-    {
+    if is_noise_entry_name(&name) {
         return None;
     }
 
@@ -118,6 +221,24 @@ fn parse_lnk_file(lnk_path: &Path) -> Option<AppEntry> {
         target_path,
         lnk_path: Some(lnk_path.to_string_lossy().to_string()),
     })
+}
+
+/// Filter out obvious non-launcher shortcuts while preserving legit app names.
+/// Example: keep "IObit Uninstaller", but skip "Uninstall Google Chrome".
+fn is_noise_entry_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+
+    // Treat uninstall as a word token only, so "uninstaller" still passes.
+    let has_uninstall_token = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| token == "uninstall");
+
+    has_uninstall_token
+        || lower.contains("readme")
+        || lower.contains("help")
+        || lower.contains("license")
+        || lower.contains("changelog")
+        || lower.contains("release notes")
 }
 
 /// Attempt to read and resolve the target executable path from a .lnk file.

@@ -10,11 +10,18 @@ use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::rc::Rc;
 use std::cell::RefCell;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
+use std::time::{Duration, Instant};
 
 slint::include_modules!();
 
-/// Apply WS_EX_TOOLWINDOW style to hide the window from the taskbar and Alt+Tab.
-/// Must be called after every `w.show()` because Slint may reset the extended style.
+const INDEX_REFRESH_INTERVAL: Duration = Duration::from_secs(45);
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 fn hide_from_taskbar(hwnd: windows::Win32::Foundation::HWND) {
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{
@@ -75,7 +82,12 @@ fn main() -> Result<(), slint::PlatformError> {
     );
 
     // 2. Scan installed applications at startup
-    let all_apps = indexer::scan_apps();
+    let all_apps = Arc::new(Mutex::new(indexer::scan_apps()));
+
+    // Async refresh channel + throttle state for re-indexing while app is running.
+    let (index_update_tx, index_update_rx) = mpsc::channel::<Vec<indexer::AppEntry>>();
+    let index_refresh_in_progress = Arc::new(AtomicBool::new(false));
+    let last_index_refresh_at = Rc::new(RefCell::new(Instant::now()));
 
     // 3. Create the Slint window
     let main_window = AppWindow::new()?;
@@ -161,7 +173,15 @@ fn main() -> Result<(), slint::PlatformError> {
     let icon_cache_search = icon_cache.clone();
     main_window.on_search_changed(move |query| {
         if let Some(w) = window_weak.upgrade() {
-            let results = indexer::search(&apps_for_search, &query);
+            let apps_guard = match apps_for_search.lock() {
+                Ok(guard) => guard,
+                Err(e) => {
+                    eprintln!("[niventic] Failed to lock app index for search: {e}");
+                    return;
+                }
+            };
+
+            let results = indexer::search(&apps_guard, &query);
             let mut cache = icon_cache_search.borrow_mut();
             let slint_results: Vec<SearchResult> = results
                 .iter()
@@ -174,7 +194,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     SearchResult {
                         name: SharedString::from(app.name.as_str()),
                         path: SharedString::from(app.target_path.as_str()),
-                        icon: SharedString::from(guess_icon(&app.name)),
+                        icon: SharedString::from(""),
                         icon_image: icon_img,
                         has_icon,
                     }
@@ -192,10 +212,21 @@ fn main() -> Result<(), slint::PlatformError> {
     main_window.on_item_activated(move |index| {
         if let Some(w) = window_weak.upgrade() {
             let query = w.get_search_text().to_string();
-            let results = indexer::search(&apps_for_launch, &query);
-            if let Some(app) = results.get(index as usize) {
+            let selected_app = {
+                let apps_guard = match apps_for_launch.lock() {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        eprintln!("[niventic] Failed to lock app index for launch: {e}");
+                        return;
+                    }
+                };
+                let results = indexer::search(&apps_guard, &query);
+                results.get(index as usize).map(|app| (*app).clone())
+            };
+
+            if let Some(app) = selected_app {
                 eprintln!("[niventic] Launching: {} ({})", app.name, app.target_path);
-                launch_app(app);
+                launch_app(&app);
 
                 // Hide the window after launching
                 let _ = w.hide();
@@ -216,17 +247,17 @@ fn main() -> Result<(), slint::PlatformError> {
         eprintln!("[niventic] Quick access: {}", name);
 
         // Find path from config
+        let clicked_name = name.trim();
         let cfg = config_for_qa.borrow();
         let path = cfg.quick_access.iter()
-            .find(|qa| qa.name.to_lowercase() == name.as_str())
+            .find(|qa| qa.name.trim().eq_ignore_ascii_case(clicked_name))
             .map(|qa| qa.path.clone());
 
         if let Some(path) = path {
             eprintln!("[niventic] Quick access launching: {}", path);
-            let _ = Command::new("cmd")
-                .raw_arg(format!("/C start \"\" \"{}\"", path))
-                .creation_flags(0x08000000)
-                .spawn();
+            if let Err(e) = launch_target_hidden(&path) {
+                eprintln!("[niventic] Failed quick access launch '{}': {e}", path);
+            }
 
             // Hide the window after launching
             if let Some(w) = window_weak.upgrade() {
@@ -359,6 +390,11 @@ fn main() -> Result<(), slint::PlatformError> {
     let vis = is_visible.clone();
     let timer = slint::Timer::default();
 
+    let apps_for_refresh = all_apps.clone();
+    let index_update_tx_timer = index_update_tx.clone();
+    let index_refresh_in_progress_timer = index_refresh_in_progress.clone();
+    let last_index_refresh_at_timer = last_index_refresh_at.clone();
+
     // Track when window was last shown (grace period for focus check)
     let shown_at: Rc<RefCell<Option<std::time::Instant>>> = Rc::new(RefCell::new(None));
     let shown_at_clone = shown_at.clone();
@@ -370,10 +406,43 @@ fn main() -> Result<(), slint::PlatformError> {
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(50),
         move || {
+            let schedule_index_refresh_if_stale = || {
+                let refresh_due = last_index_refresh_at_timer.borrow().elapsed() >= INDEX_REFRESH_INTERVAL;
+                if refresh_due
+                    && index_refresh_in_progress_timer
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    let tx = index_update_tx_timer.clone();
+                    std::thread::spawn(move || {
+                        let refreshed = indexer::scan_apps();
+                        let _ = tx.send(refreshed);
+                    });
+                }
+            };
+
+            // Apply background re-index result if available.
+            match index_update_rx.try_recv() {
+                Ok(new_apps) => {
+                    let count = new_apps.len();
+                    if let Ok(mut apps) = apps_for_refresh.lock() {
+                        *apps = new_apps;
+                        *last_index_refresh_at_timer.borrow_mut() = Instant::now();
+                        eprintln!("[niventic] App index refreshed: {} entries", count);
+                    } else {
+                        eprintln!("[niventic] Failed to update app index after refresh");
+                    }
+                    index_refresh_in_progress_timer.store(false, Ordering::Release);
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {}
+            }
+
             // === Tray Icon & Menu Events ===
             if let Ok(event) = tray_event_receiver.try_recv() {
                 match event {
                     tray_icon::TrayIconEvent::Click { button: tray_icon::MouseButton::Left, .. } => {
+                        schedule_index_refresh_if_stale();
                         if let Some(w) = window_weak.upgrade() {
                             let sz = w.window().size();
                             w.window().set_position(center_position(sz.width as i32, sz.height as i32));
@@ -396,6 +465,7 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             if let Ok(event) = tray_menu_receiver.try_recv() {
                 if event.id == show_i.id() {
+                    schedule_index_refresh_if_stale();
                     if let Some(w) = window_weak.upgrade() {
                         let sz = w.window().size();
                         w.window().set_position(center_position(sz.width as i32, sz.height as i32));
@@ -413,6 +483,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         w.invoke_focus_search();
                     }
                 } else if event.id == settings_i.id() {
+                    schedule_index_refresh_if_stale();
                     if let Some(w) = window_weak.upgrade() {
                         let sz = w.window().size();
                         w.window().set_position(center_position(sz.width as i32, sz.height as i32));
@@ -486,6 +557,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         *shown_at_clone.borrow_mut() = None;
                         eprintln!("[niventic] Window hidden");
                     } else {
+                        schedule_index_refresh_if_stale();
                         // Reset search state when showing
                         w.set_search_text(SharedString::from(""));
                         w.set_selected_index(0);
@@ -573,9 +645,7 @@ fn launch_app(app: &indexer::AppEntry) {
         return;
     }
 
-    let result = Command::new("cmd")
-        .args(["/C", "start", "", path_to_launch])
-        .spawn();
+    let result = launch_target_hidden(path_to_launch);
 
     match result {
         Ok(_) => eprintln!("[niventic] Successfully launched: {}", app.name),
@@ -583,44 +653,52 @@ fn launch_app(app: &indexer::AppEntry) {
     }
 }
 
-/// Guess an emoji icon based on the app name.
-fn guess_icon(name: &str) -> &'static str {
-    let n = name.to_lowercase();
-    if n.contains("code") || n.contains("studio") || n.contains("ide") {
-        "💻"
-    } else if n.contains("terminal") || n.contains("cmd") || n.contains("powershell") || n.contains("console") {
-        "🖥️"
-    } else if n.contains("firefox") || n.contains("chrome") || n.contains("edge") || n.contains("browser") || n.contains("opera") || n.contains("brave") {
-        "🌐"
-    } else if n.contains("explorer") || n.contains("file") || n.contains("folder") {
-        "📁"
-    } else if n.contains("calc") {
-        "🧮"
-    } else if n.contains("note") || n.contains("text") || n.contains("edit") || n.contains("word") {
-        "📝"
-    } else if n.contains("task") || n.contains("monitor") {
-        "📊"
-    } else if n.contains("settings") || n.contains("config") || n.contains("control") || n.contains("panel") {
-        "⚙️"
-    } else if n.contains("mail") || n.contains("outlook") || n.contains("thunder") {
-        "📧"
-    } else if n.contains("music") || n.contains("spotify") || n.contains("audio") || n.contains("sound") {
-        "🎵"
-    } else if n.contains("photo") || n.contains("image") || n.contains("paint") || n.contains("gimp") {
-        "🖼️"
-    } else if n.contains("video") || n.contains("player") || n.contains("vlc") || n.contains("media") {
-        "🎬"
-    } else if n.contains("game") || n.contains("steam") || n.contains("epic") {
-        "🎮"
-    } else if n.contains("discord") || n.contains("slack") || n.contains("teams") || n.contains("chat") || n.contains("telegram") {
-        "💬"
-    } else if n.contains("git") || n.contains("github") {
-        "🔧"
-    } else if n.contains("store") || n.contains("shop") {
-        "🛒"
-    } else {
-        "📦"
+/// Launch a target path/URI/shell verb via native Windows shell execution.
+/// Falls back to hidden `cmd /C start` for edge-case compatibility.
+fn launch_target_hidden(target: &str) -> std::io::Result<()> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "launch target is empty",
+        ));
     }
+
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::PCWSTR;
+
+    let verb_w: Vec<u16> = "open\0".encode_utf16().collect();
+    let target_w: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb_w.as_ptr()),
+            PCWSTR(target_w.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    if (result.0 as usize) <= 32 {
+        eprintln!(
+            "[niventic] ShellExecuteW failed for '{}' (code {}), falling back to cmd start",
+            target,
+            result.0 as usize
+        );
+
+        // Fallback keeps launch compatibility for unusual shell targets.
+        let escaped_target = target.replace('"', "\"\"");
+        return Command::new("cmd")
+            .raw_arg(format!("/C start \"\" \"{}\"", escaped_target))
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map(|_| ());
+    }
+
+    Ok(())
 }
 
 /// Bind config string values to Slint properties (for settings UI editing).
