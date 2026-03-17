@@ -17,8 +17,8 @@ export struct QuickAccessEntry {
 
 export component AppWindow inherits Window {
     title: "Niventic Launcher";
-    width: root.cfg-width.to-float() * 1px;
-    height: root.cfg-height.to-float() * 1px;
+    width: root.app-width * 1px;
+    height: root.app-height * 1px;
     no-frame: true;
     always-on-top: true;
     icon: @image-url("assets/logo.png");
@@ -54,6 +54,8 @@ export component AppWindow inherits Window {
     in-out property <brush> app-border-color: #a9a9a9;
     in-out property <string> app-font: "JetBrainsMono Nerd Font";
     in-out property <float> app-opacity: 0.9;
+    in-out property <float> app-width: 800;
+    in-out property <float> app-height: 500;
     callback pick-color(string);
     callback pick-qa-path(int);
     callback pick-qa-icon(int);

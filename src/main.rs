@@ -724,6 +724,8 @@ fn apply_appearance(w: &AppWindow, appearance: &config::AppearanceConfig) {
     w.set_app_border_color(slint::Brush::from(parse_hex_color(&appearance.border_color)));
     w.set_app_font(SharedString::from(&appearance.font));
     w.set_app_opacity(appearance.opacity);
+    w.set_app_width(appearance.width as f32);
+    w.set_app_height(appearance.height as f32);
 }
 
 /// Parse a hex color string like "#2d2d30" to slint::Color.
